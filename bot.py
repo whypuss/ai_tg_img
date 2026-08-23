@@ -96,9 +96,10 @@ async def download_image(item):
 def parse_args(args):
     """返回 (prompt, size)。支持開頭帶比例，如 /draw 16:9 一隻貓"""
     size = "2048x2048"
-    if args and args[0] in SIZES:
-        size = SIZES[args.pop(0)]
-    return " ".join(args).strip(), size
+    items = list(args)  # context.args 是 tuple，轉 list 先 pop
+    if items and items[0] in SIZES:
+        size = SIZES[items.pop(0)]
+    return " ".join(items).strip(), size
 
 
 async def draw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
