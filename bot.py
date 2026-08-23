@@ -201,7 +201,7 @@ async def sum_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             model=SUMMARY_MODEL,
             messages=[
                 {"role": "system", "content":
-                 "你是一個群組聊天總結助手。用繁體中文（廣東話口吻）輸出簡潔總結："
+                 "你是一個群組聊天總結助手。用繁體中文書面語輸出簡潔總結（不要口語或粵語用詞）："
                  "主要話題、討論要點、有共識的決定、未解決的問題。用 bullet list。"},
                 {"role": "user", "content": f"請總結以下聊天記錄：\n\n{transcript}"}],
             max_tokens=1024)
