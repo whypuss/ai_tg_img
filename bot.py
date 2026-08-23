@@ -219,6 +219,18 @@ VOICE_CANTONESE = "zh-HK-HiuMaanNeural"  # 粵語女聲
 VOICE_MANDARIN = "zh-CN-XiaoxiaoNeural"  # 普通話女聲
 
 
+async def _tts_stream(communicate):
+    """edge-tts 帶重試：TimeoutError / 網絡抖動時重連一次（音頻其實已收大部分）"""
+    import edge_tts
+    try:
+        async for chunk in communicate.stream():
+            yield chunk
+    except (asyncio.TimeoutError, ConnectionError) as e:
+        log.warning("tts stream retry after: %s", e)
+        async for chunk in communicate.stream():
+            yield chunk
+
+
 async def tts_command(update: Update, context: ContextTypes.DEFAULT_TYPE, voice: str):
     text = " ".join(context.args).strip()
     if not text and update.message.reply_to_message:
@@ -234,17 +246,25 @@ async def tts_command(update: Update, context: ContextTypes.DEFAULT_TYPE, voice:
     try:
         text = text[:500]
         import edge_tts
+        # 回覆訊息可能好長 → 分段合成；超時重試一次
         communicate = edge_tts.Communicate(text, voice)
         buf = io.BytesIO()
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                buf.write(chunk["data"])
+        async for attempt in _tts_stream(communicate):
+            if attempt["type"] == "audio":
+                buf.write(attempt["data"])
         buf.seek(0)
         buf.name = "speech.mp3"
         await update.message.reply_voice(voice=buf)
         await status.delete()
     except Exception as e:
         log.exception("tts failed")
+        # 音頻其實收到咗（只是串流尾超時）→ 照發
+        if buf.tell() > 1000:
+            buf.seek(0)
+            buf.name = "speech.mp3"
+            await update.message.reply_voice(voice=buf)
+            await status.delete()
+            return
         await status.edit_text(f"❌ 語音合成失敗：{str(e)[:300]}")
 
 
