@@ -227,8 +227,13 @@ VOICE_MANDARIN = "zh-CN-XiaoxiaoNeural"  # 普通話女聲
 
 async def tts_command(update: Update, context: ContextTypes.DEFAULT_TYPE, voice: str):
     text = " ".join(context.args).strip()
+    if not text and update.message.reply_to_message:
+        # 回覆某句訊息 + /say → 自動朗讀該訊息文字
+        text = (update.message.reply_to_message.text or "").strip()
     if not text:
-        await update.message.reply_text("用法：/say <文字>（普通話）或 /sayc <文字>（粵語），上限500字")
+        await update.message.reply_text(
+            "用法：/say <文字>（普通話）或 /sayc <文字>（粵語），"
+            "或者回覆一句訊息打 /say 自動朗讀，上限500字")
         return
 
     status = await update.message.reply_text("🔊 合成中…")
