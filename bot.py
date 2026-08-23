@@ -22,11 +22,10 @@ SUMMARY_MODEL = "deepseek-v4-flash"
 # 只用非 reasoning 模型（reasoning 模型 max_tokens 有限制會燒完喺 thinking 度）
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "x")
 CHAT_MODEL_POOL = [
+    ("or-free",     lambda: AsyncOpenAI(api_key=OPENROUTER_API_KEY, base_url="https://openrouter.ai/api/v1"), "openrouter/free"),
     ("sn-deepseek", lambda: client, "deepseek-v4-flash"),
     ("sn-glm",      lambda: client, "glm-5.2"),
     ("sn-6.7",      lambda: client, "sensenova-6.7-flash-lite"),
-    ("or-free",     lambda: AsyncOpenAI(api_key=OPENROUTER_API_KEY, base_url="https://openrouter.ai/api/v1"), "openrouter/free"),
-    ("or-dots",     lambda: AsyncOpenAI(api_key=OPENROUTER_API_KEY, base_url="https://openrouter.ai/api/v1"), "dots-studio/dots-3-note-preview:free"),
 ]
 
 # 全局輪詢計數器（bot_data 持久化，每個 request 輪轉）
