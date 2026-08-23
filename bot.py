@@ -220,12 +220,51 @@ async def sum_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status.edit_text(f"❌ 總結失敗：{str(e)[:400]}")
 
 
+# ---------------- TTS（Edge-TTS，免費）----------------
+VOICE_CANTONESE = "zh-HK-HiuMaanNeural"  # 粵語女聲
+VOICE_MANDARIN = "zh-CN-XiaoxiaoNeural"  # 普通話女聲
+
+
+async def tts_command(update: Update, context: ContextTypes.DEFAULT_TYPE, voice: str):
+    text = " ".join(context.args).strip()
+    if not text:
+        await update.message.reply_text("用法：/say <文字>（普通話）或 /sayc <文字>（粵語），上限500字")
+        return
+
+    status = await update.message.reply_text("🔊 合成中…")
+    try:
+        text = text[:500]
+        import edge_tts
+        communicate = edge_tts.Communicate(text, voice)
+        buf = io.BytesIO()
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                buf.write(chunk["data"])
+        buf.seek(0)
+        buf.name = "speech.mp3"
+        await update.message.reply_voice(voice=buf)
+        await status.delete()
+    except Exception as e:
+        log.exception("tts failed")
+        await status.edit_text(f"❌ 語音合成失敗：{str(e)[:300]}")
+
+
+async def say_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await tts_command(update, context, VOICE_MANDARIN)
+
+
+async def sayc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await tts_command(update, context, VOICE_CANTONESE)
+
+
 def main():
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("draw", draw_command))
     app.add_handler(CommandHandler("redraw", redraw_command))
     app.add_handler(CommandHandler("sum", sum_command))
+    app.add_handler(CommandHandler("say", say_command))
+    app.add_handler(CommandHandler("sayc", sayc_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, record_message))
     log.info("Draw bot started")
     app.run_polling()
