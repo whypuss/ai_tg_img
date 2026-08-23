@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import io
+import json
 import logging
 import os
 
@@ -207,13 +208,30 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                     "總結聊天記錄：/sum [條數，預設100]")
 
 
-# ---------------- 聊天記錄總結 ----------------
-CHAT_HISTORY_MAX = 500  # 每個 chat 最多保留幾多句
+# ---------------- 聊天記錄總結（持久化到檔案，重啟不丟）----------------
+CHAT_HISTORY_MAX = 500
+CHAT_HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".chat_history.json")
+
+
+def _load_hist() -> dict:
+    try:
+        with open(CHAT_HISTORY_FILE, "r") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_hist(hist: dict):
+    with open(CHAT_HISTORY_FILE, "w") as f:
+        json.dump(hist, f)
 
 
 def chat_hist(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> list:
-    hist = context.bot_data.setdefault("chat_history", {})
-    return hist.setdefault(chat_id, [])
+    if "chat_history" not in context.bot_data:
+        context.bot_data["chat_history"] = _load_hist()
+    hist = context.bot_data["chat_history"]
+    hist.setdefault(str(chat_id), [])
+    return hist[str(chat_id)]
 
 
 async def record_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -222,12 +240,13 @@ async def record_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not msg or not msg.text or msg.text.startswith("/"):
         return
     name = msg.from_user.full_name if msg.from_user else "?"
-    log.info("record: chat=%s %s: %s", msg.chat_id, name, msg.text[:40])
-    chat_hist(context, msg.chat_id).append(
-        {"name": name, "text": msg.text[:1000], "ts": int(msg.date.timestamp())})
     h = chat_hist(context, msg.chat_id)
+    h.append({"name": name, "text": msg.text[:1000], "ts": int(msg.date.timestamp())})
     if len(h) > CHAT_HISTORY_MAX:
         del h[: len(h) - CHAT_HISTORY_MAX]
+    # 每 10 條保存一次，避免寫入太頻
+    if len(h) % 10 == 0:
+        _save_hist(context.bot_data["chat_history"])
 
 
 async def sum_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
