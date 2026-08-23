@@ -94,11 +94,15 @@ async def download_image(item):
 
 
 def parse_args(args):
-    """返回 (prompt, size)。支持開頭帶比例，如 /draw 16:9 一隻貓"""
+    """返回 (prompt, size)。比例可放開頭或結尾，如 /draw 9:16 一隻貓 或 /draw 一隻貓 9:16"""
     size = "2048x2048"
-    items = list(args)  # context.args 是 tuple，轉 list 先 pop
+    items = list(args)
+    # 嘗試頭部
     if items and items[0] in SIZES:
         size = SIZES[items.pop(0)]
+    # 嘗試結尾
+    elif items and items[-1] in SIZES:
+        size = SIZES[items.pop()]
     return " ".join(items).strip(), size
 
 
@@ -115,7 +119,7 @@ async def draw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         item = (await client.images.generate(
             model=IMAGE_MODEL, prompt=prompt, n=1, size=size)).data[0]
 
-        caption = f"🎨 {prompt}"
+        caption = f"🎨 {prompt}\n({size})"
         photo = await download_image(item)
         await update.message.reply_photo(photo=photo, caption=caption)
         await status.delete()
