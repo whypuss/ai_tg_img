@@ -18,12 +18,15 @@ SENSENOVA_BASE_URL = "https://token.sensenova.cn/v1"
 IMAGE_MODEL = "sensenova-u1-fast"
 VISION_MODEL = "sensenova-6.7-flash-lite"
 SUMMARY_MODEL = "deepseek-v4-flash"
-# 模型輪詢池：SenseNova 三個非 reasoning 模型輪流用，分散 TPM 額度
-# opencode zen 兩個 fallback 模型（mimo 空 content / muse 被地區封）已移除
+# 模型輪詢池：分散 quota。429/空 content 自動跳下一個
+# 只用非 reasoning 模型（reasoning 模型 max_tokens 有限制會燒完喺 thinking 度）
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "x")
 CHAT_MODEL_POOL = [
     ("sn-deepseek", lambda: client, "deepseek-v4-flash"),
     ("sn-glm",      lambda: client, "glm-5.2"),
     ("sn-6.7",      lambda: client, "sensenova-6.7-flash-lite"),
+    ("or-free",     lambda: AsyncOpenAI(api_key=OPENROUTER_API_KEY, base_url="https://openrouter.ai/api/v1"), "openrouter/free"),
+    ("or-dots",     lambda: AsyncOpenAI(api_key=OPENROUTER_API_KEY, base_url="https://openrouter.ai/api/v1"), "dots-studio/dots-3-note-preview:free"),
 ]
 
 # 全局輪詢計數器（bot_data 持久化，每個 request 輪轉）
