@@ -319,31 +319,34 @@ async def sayc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def ans_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """回覆訊息 + /ans → AI 簡短回答（≤30字）"""
-    reply = update.message.reply_to_message
+    """/ans 問答：回覆訊息 + /ans（加追問），或直接 /ans 問題"""
     question = " ".join(context.args).strip()
-    if not reply:
-        await update.message.reply_text("用法：回覆一句訊息 + /ans（可加追問，如 /ans 點解？），AI 會簡短回答")
-        return
-    target = (reply.text or "").strip()
-    if not target:
-        await update.message.reply_text("只能回覆文字訊息")
+    reply = update.message.reply_to_message
+    if not question and not reply:
+        await update.message.reply_text(
+            "用法：\n"
+            "  /ans <問題>  直接問，如 /ans doff是什麼\n"
+            "  回覆訊息 + /ans  對別人嘅話追問")
         return
 
     status = await update.message.reply_text("🤖 思考中…")
     try:
         system_prompt = ("你是一個聊天群組助手。用繁體中文書面語回答，"
                          "嚴格限制在30字以內，直接給答案，不要客套、不要開場白、不要展開。")
-        user_msg = f"有人喺群組講咗：「{target[:500]}」"
-        if question:
-            user_msg += f"\n用戶想知：{question[:200]}"
+        if reply and (reply.text or "").strip():
+            target = (reply.text or "").strip()
+            user_msg = f"有人喺群組講咗：「{target[:500]}」"
+            if question:
+                user_msg += f"\n用戶想知：{question[:200]}"
+        else:
+            user_msg = f"用戶問題：{question[:500]}"
         user_msg += "\n請用最多30字回應。"
 
         raw = await _chat_complete(context, system_prompt, user_msg, max_tokens=100)
         answer = (raw.strip() or "（冇答案，試多次）")[:60]
         await status.edit_text(f"🤖 {answer}")
     except Exception as e:
-        log.exception("ai failed")
+        log.exception("ans failed")
         await status.edit_text(f"❌ 失敗：{str(e)[:200]}")
 
 
