@@ -249,7 +249,7 @@ async def record_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def sum_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """總結最近 N 句聊天記錄：/sum [N]"""
-    n = 100
+    n = 200
     if context.args and context.args[0].isdigit():
         n = max(5, min(int(context.args[0]), CHAT_HISTORY_MAX))
     h = chat_hist(context, update.effective_chat.id)[-n:]
