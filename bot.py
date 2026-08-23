@@ -197,15 +197,25 @@ async def sum_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         lines = [f"[{m['name']}] {m['text']}" for m in h]
         transcript = "\n".join(lines)
-        resp = await client.chat.completions.create(
-            model=SUMMARY_MODEL,
-            messages=[
-                {"role": "system", "content":
-                 "你是一個群組聊天總結助手。用繁體中文書面語輸出簡潔總結（不要口語或粵語用詞）："
-                 "主要話題、討論要點、有共識的決定、未解決的問題。用 bullet list。"},
-                {"role": "user", "content": f"請總結以下聊天記錄：\n\n{transcript}"}],
-            max_tokens=1024)
-        raw = resp.choices[0].message.content
+        raw = None
+        for attempt in range(3):
+            try:
+                resp = await client.chat.completions.create(
+                    model=SUMMARY_MODEL,
+                    messages=[
+                        {"role": "system", "content":
+                         "你是一個群組聊天總結助手。用繁體中文書面語輸出簡潔總結（不要口語或粵語用詞）："
+                         "主要話題、討論要點、有共識的決定、未解決的問題。用 bullet list。"},
+                        {"role": "user", "content": f"請總結以下聊天記錄：\n\n{transcript}"}],
+                    max_tokens=1024)
+                raw = resp.choices[0].message.content
+                break
+            except Exception as e:
+                if "429" in str(e) and attempt < 2:
+                    await status.edit_text(f"📝 額度繁忙，{15 * (attempt + 1)}秒後重試…")
+                    await asyncio.sleep(15 * (attempt + 1))
+                else:
+                    raise
         summary = (raw or "").strip() or "（模型冇返回內容，試多次或者減少條數）"
         await status.edit_text(f"📝 **最近 {len(h)} 句總結**\n\n{summary[:4000]}",
                                parse_mode="Markdown")
