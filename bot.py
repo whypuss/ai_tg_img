@@ -87,7 +87,7 @@ async def draw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status.edit_text(f"❌ 生成失敗：{msg[:400]}")
 
 
-def get_source_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def get_source_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """由回覆嘅訊息攞原圖 bytes，唔係回覆就返回 None"""
     msg = update.message
     reply = msg.reply_to_message
@@ -95,17 +95,18 @@ def get_source_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return None
     photo = reply.photo or (reply.sticker if getattr(reply, "sticker", None) and not reply.sticker.is_animated else None)
     doc = reply.document
-    data = None
+    buf = io.BytesIO()
     if photo:
-        data = (photo[-1]).get_file()
+        data = await (photo[-1]).get_file()
+        await data.download_to_memory(buf)
     elif doc and (doc.mime_type or "").startswith("image/"):
-        data = doc.get_file()
+        data = await doc.get_file()
+        await data.download_to_memory(buf)
     elif reply.sticker:
-        data = reply.sticker.get_file()
+        data = await reply.sticker.get_file()
+        await data.download_to_memory(buf)
     else:
         return None
-    buf = io.BytesIO()
-    data.download(out=buf)
     buf.seek(0)
     return buf.read()
 
@@ -113,7 +114,7 @@ def get_source_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def redraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """圖生圖：/redraw <改動描述>，回覆一張圖使用"""
     prompt = " ".join(context.args).strip()
-    img = await asyncio.to_thread(get_source_image, update, context)
+    img = await get_source_image(update, context)
     if img is None:
         await update.message.reply_text(
             "用法：回覆一張圖片，然後發 /redraw <想點改>\n例如：/redraw 加上雪景同黃昏光線")
