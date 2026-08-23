@@ -316,12 +316,12 @@ async def sayc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await tts_command(update, context, VOICE_CANTONESE)
 
 
-async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """回覆訊息 + /ai → AI 簡短回答（≤30字）"""
+async def ans_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """回覆訊息 + /ans → AI 簡短回答（≤30字）"""
     reply = update.message.reply_to_message
     question = " ".join(context.args).strip()
     if not reply:
-        await update.message.reply_text("用法：回覆一句訊息 + /ai（可加追問，如 /ai 點解？），AI 會簡短回答")
+        await update.message.reply_text("用法：回覆一句訊息 + /ans（可加追問，如 /ans 點解？），AI 會簡短回答")
         return
     target = (reply.text or "").strip()
     if not target:
@@ -353,7 +353,7 @@ def main():
     app.add_handler(CommandHandler("sum", sum_command))
     app.add_handler(CommandHandler("say", say_command))
     app.add_handler(CommandHandler("sayc", sayc_command))
-    app.add_handler(CommandHandler("ai", ai_command))
+    app.add_handler(CommandHandler("ans", ans_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, record_message))
     log.info("Draw bot started")
     app.run_polling()
