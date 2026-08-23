@@ -17,17 +17,13 @@ SENSENOVA_API_KEY = os.environ["SENSENOVA_API_KEY"]
 SENSENOVA_BASE_URL = "https://token.sensenova.cn/v1"
 IMAGE_MODEL = "sensenova-u1-fast"
 VISION_MODEL = "sensenova-6.7-flash-lite"
-SUMMARY_MODEL = "deepseek-v4-flash"  # 非 reasoning 模型，/sum 用（flash-lite 燒晒 tokens 喺 thinking）
-# 模型輪詢池：多個 provider 輪流用，分散 quota
-FALLBACK_API_KEY = os.environ.get("OPENCODE_API_KEY", "x")
+SUMMARY_MODEL = "deepseek-v4-flash"
+# 模型輪詢池：SenseNova 三個非 reasoning 模型輪流用，分散 TPM 額度
+# opencode zen 兩個 fallback 模型（mimo 空 content / muse 被地區封）已移除
 CHAT_MODEL_POOL = [
-    # (provider_label, client, model)
     ("sn-deepseek", lambda: client, "deepseek-v4-flash"),
     ("sn-glm",      lambda: client, "glm-5.2"),
     ("sn-6.7",      lambda: client, "sensenova-6.7-flash-lite"),
-    ("oc-nemotron", lambda: AsyncOpenAI(api_key=FALLBACK_API_KEY, base_url="https://opencode.ai/zen/v1"), "nemotron-3-ultra-free"),
-    ("oc-preview",  lambda: AsyncOpenAI(api_key=FALLBACK_API_KEY, base_url="https://opencode.ai/zen/v1"), "x-preview-f-free"),
-    ("oc-laguna",   lambda: AsyncOpenAI(api_key=FALLBACK_API_KEY, base_url="https://opencode.ai/zen/v1"), "laguna-s-2.1-free"),
 ]
 
 # 全局輪詢計數器（bot_data 持久化，每個 request 輪轉）
