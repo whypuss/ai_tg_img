@@ -210,7 +210,8 @@ async def sum_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                  "主要話題、討論要點、有共識的決定、未解決的問題。用 bullet list。"},
                 {"role": "user", "content": f"請總結以下聊天記錄：\n\n{transcript}"}],
             max_tokens=1024))
-        summary = resp.choices[0].message.content.strip()
+        raw = resp.choices[0].message.content
+        summary = (raw or "").strip() or "（模型冇返回內容，試多次或者減少條數）"
         await status.edit_text(f"📝 **最近 {len(h)} 句總結**\n\n{summary[:4000]}",
                                parse_mode="Markdown")
     except Exception as e:
