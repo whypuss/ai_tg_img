@@ -264,13 +264,22 @@ async def sum_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines = [f"[{m['name']}] {m['text']}" for m in h]
         transcript = "\n".join(lines)
         system_prompt = (
-            "你是一個群組聊天總結助手。用繁體中文書面語輸出簡潔總結（不要口語或粵語用詞），"
-            "總字數嚴格限制在120字以內：主要話題、討論要點、決定、未解決問題。用 bullet list。")
+            "你是一個群組聊天總結助手。用繁體中文書面語輸出結構化總結，"
+            "要求如下：\n"
+            "1. 每個 bullet 至少兩句話，具體說明「誰」說了「什麼」，不要只寫一句摘要\n"
+            "2. 包含具體數據、決定、人名，不要模糊處理\n"
+            "3. 按話題分組，有邏輯層級\n"
+            "4. 總長控制在200字左右（唔好太少，要資訊豐富）\n"
+            "5. 不要口語或粵語用詞\n"
+            "格式：\n📌 主要話題\n• 具體內容（包含人物、事件、數據）\n"
+            "📌 討論要點\n• 詳述各人觀點與論據\n"
+            "📌 結論 / 決定\n• 有共識的事項\n"
+            "📌 未解決問題\n• 仍有分歧或未定之處")
         raw = await _chat_complete(context, system_prompt,
-                                   f"請總結以下聊天記錄：\n\n{transcript}",
-                                   max_tokens=300)
+                                   f"請總結以下聊天記錄（注意保留關鍵資訊，不要過度壓縮）：\n\n{transcript}",
+                                   max_tokens=500)
         summary = (raw or "").strip() or "（模型冇返回內容，試多次或者減少條數）"
-        summary = summary[:120]
+        summary = summary[:300]
         await status.edit_text(f"📝 最近 {len(h)} 句總結\n\n{summary[:4000]}",
                                disable_web_page_preview=True)
     except Exception as e:
