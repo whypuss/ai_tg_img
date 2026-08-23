@@ -17,10 +17,50 @@ SENSENOVA_BASE_URL = "https://token.sensenova.cn/v1"
 IMAGE_MODEL = "sensenova-u1-fast"
 VISION_MODEL = "sensenova-6.7-flash-lite"
 SUMMARY_MODEL = "deepseek-v4-flash"  # 非 reasoning 模型，/sum 用（flash-lite 燒晒 tokens 喺 thinking）
-# fallback：SenseNova 429 時改用 opencode zen（keyless 額度）
-FALLBACK_BASE_URL = "https://opencode.ai/zen/v1"
-FALLBACK_API_KEY = os.environ.get("OPENCODE_API_KEY", "")
-FALLBACK_MODEL = "nemotron-3-ultra-free"
+# 模型輪詢池：多個 provider 輪流用，分散 quota
+FALLBACK_API_KEY = os.environ.get("OPENCODE_API_KEY", "x")
+CHAT_MODEL_POOL = [
+    # (provider_label, client, model)
+    ("sn-deepseek", lambda: client, "deepseek-v4-flash"),
+    ("sn-glm",      lambda: client, "glm-5.2"),
+    ("sn-6.7",      lambda: client, "sensenova-6.7-flash-lite"),
+    ("oc-nemotron", lambda: AsyncOpenAI(api_key=FALLBACK_API_KEY, base_url="https://opencode.ai/zen/v1"), "nemotron-3-ultra-free"),
+    ("oc-preview",  lambda: AsyncOpenAI(api_key=FALLBACK_API_KEY, base_url="https://opencode.ai/zen/v1"), "x-preview-f-free"),
+    ("oc-laguna",   lambda: AsyncOpenAI(api_key=FALLBACK_API_KEY, base_url="https://opencode.ai/zen/v1"), "laguna-s-2.1-free"),
+]
+
+# 全局輪詢計數器（bot_data 持久化，每個 request 輪轉）
+def _next_pool_idx(context: ContextTypes.DEFAULT_TYPE) -> int:
+    idx = context.bot_data.get("pool_idx", 0)
+    context.bot_data["pool_idx"] = (idx + 1) % len(CHAT_MODEL_POOL)
+    return idx
+
+async def _chat_complete(context: ContextTypes.DEFAULT_TYPE,
+                         system_prompt: str, user_msg: str,
+                         max_tokens: int = 1024) -> str:
+    """輪詢池調用：順序試每個模型，第一個成功返回，429/403 自動跳下一個"""
+    start = _next_pool_idx(context)
+    errors = []
+    for i in range(len(CHAT_MODEL_POOL)):
+        idx = (start + i) % len(CHAT_MODEL_POOL)
+        label, client_fn, model = CHAT_MODEL_POOL[idx]
+        try:
+            c = client_fn()
+            resp = await c.chat.completions.create(
+                model=model,
+                messages=[{"role": "system", "content": system_prompt},
+                          {"role": "user", "content": user_msg}],
+                max_tokens=max_tokens)
+            raw = resp.choices[0].message.content
+            if raw:
+                return raw.strip()
+            errors.append(f"{label}: empty response")
+        except Exception as e:
+            err = f"{label}: {e}"
+            log.warning("pool skip %s", err)
+            errors.append(err)
+            continue
+    raise RuntimeError("所有模型輪詢完都失敗：" + " | ".join(errors[-5:]))
 
 # 比例快捷映射 → SenseNova 支持的尺寸
 SIZES = {
@@ -201,42 +241,11 @@ async def sum_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         lines = [f"[{m['name']}] {m['text']}" for m in h]
         transcript = "\n".join(lines)
-        raw = None
-        for attempt in range(3):
-            try:
-                resp = await client.chat.completions.create(
-                    model=SUMMARY_MODEL,
-                    messages=[
-                        {"role": "system", "content":
-                         "你是一個群組聊天總結助手。用繁體中文書面語輸出簡潔總結（不要口語或粵語用詞）："
-                         "主要話題、討論要點、有共識的決定、未解決的問題。用 bullet list。"},
-                        {"role": "user", "content": f"請總結以下聊天記錄：\n\n{transcript}"}],
-                    max_tokens=1024)
-                raw = resp.choices[0].message.content
-                break
-            except Exception as e:
-                if "429" in str(e) and attempt < 2:
-                    await status.edit_text(f"📝 額度繁忙，{15 * (attempt + 1)}秒後重試…")
-                    await asyncio.sleep(15 * (attempt + 1))
-                else:
-                    raise
-        # fallback：SenseNova 仍然 429 → opencode zen
-        if raw is None:
-            try:
-                fb = AsyncOpenAI(api_key=FALLBACK_API_KEY or "x",
-                                 base_url=FALLBACK_BASE_URL)
-                resp = await fb.chat.completions.create(
-                    model=FALLBACK_MODEL,
-                    messages=[
-                        {"role": "system", "content":
-                         "你是一個群組聊天總結助手。用繁體中文書面語輸出簡潔總結（不要口語或粵語用詞）："
-                         "主要話題、討論要點、有共識的決定、未解決的問題。用 bullet list。"},
-                        {"role": "user", "content": f"請總結以下聊天記錄：\n\n{transcript}"}],
-                    max_tokens=1024)
-                raw = resp.choices[0].message.content
-            except Exception as e:
-                log.exception("fallback failed")
-                raise RuntimeError(f"SenseNova 同 fallback 都失敗：{e}") from e
+        system_prompt = (
+            "你是一個群組聊天總結助手。用繁體中文書面語輸出簡潔總結（不要口語或粵語用詞）："
+            "主要話題、討論要點、有共識的決定、未解決的問題。用 bullet list。")
+        raw = await _chat_complete(context, system_prompt,
+                                   f"請總結以下聊天記錄：\n\n{transcript}")
         summary = (raw or "").strip() or "（模型冇返回內容，試多次或者減少條數）"
         await status.edit_text(f"📝 **最近 {len(h)} 句總結**\n\n{summary[:4000]}",
                                parse_mode="Markdown")
@@ -307,6 +316,35 @@ async def sayc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await tts_command(update, context, VOICE_CANTONESE)
 
 
+async def ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """回覆訊息 + /ai → AI 簡短回答（≤30字）"""
+    reply = update.message.reply_to_message
+    question = " ".join(context.args).strip()
+    if not reply:
+        await update.message.reply_text("用法：回覆一句訊息 + /ai（可加追問，如 /ai 點解？），AI 會簡短回答")
+        return
+    target = (reply.text or "").strip()
+    if not target:
+        await update.message.reply_text("只能回覆文字訊息")
+        return
+
+    status = await update.message.reply_text("🤖 思考中…")
+    try:
+        system_prompt = ("你是一個聊天群組助手。用繁體中文書面語回答，"
+                         "嚴格限制在30字以內，直接給答案，不要客套、不要開場白、不要展開。")
+        user_msg = f"有人喺群組講咗：「{target[:500]}」"
+        if question:
+            user_msg += f"\n用戶想知：{question[:200]}"
+        user_msg += "\n請用最多30字回應。"
+
+        raw = await _chat_complete(context, system_prompt, user_msg, max_tokens=100)
+        answer = (raw.strip() or "（冇答案，試多次）")[:60]
+        await status.edit_text(f"🤖 {answer}")
+    except Exception as e:
+        log.exception("ai failed")
+        await status.edit_text(f"❌ 失敗：{str(e)[:200]}")
+
+
 def main():
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start_command))
@@ -315,6 +353,7 @@ def main():
     app.add_handler(CommandHandler("sum", sum_command))
     app.add_handler(CommandHandler("say", say_command))
     app.add_handler(CommandHandler("sayc", sayc_command))
+    app.add_handler(CommandHandler("ai", ai_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, record_message))
     log.info("Draw bot started")
     app.run_polling()
