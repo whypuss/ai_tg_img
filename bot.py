@@ -159,7 +159,63 @@ async def redraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Hi！用 /draw <描述> 生圖 🎨\n"
-                                    "圖生圖：回覆一張圖 + /redraw <想點改>")
+                                    "圖生圖：回覆一張圖 + /redraw <想點改>\n"
+                                    "總結聊天記錄：/sum [條數，預設100]")
+
+
+# ---------------- 聊天記錄總結 ----------------
+CHAT_HISTORY_MAX = 500  # 每個 chat 最多保留幾多句
+
+
+def chat_hist(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> list:
+    hist = context.bot_data.setdefault("chat_history", {})
+    return hist.setdefault(chat_id, [])
+
+
+async def record_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """被動記錄每個 chat 嘅文字訊息（需要 Group Privacy off 先收齊）"""
+    msg = update.message or update.edited_message
+    if not msg or not msg.text or msg.text.startswith("/"):
+        return
+    name = msg.from_user.full_name if msg.from_user else "?"
+    log.info("record: chat=%s %s: %s", msg.chat_id, name, msg.text[:40])
+    chat_hist(context, msg.chat_id).append(
+        {"name": name, "text": msg.text[:1000], "ts": int(msg.date.timestamp())})
+    h = chat_hist(context, msg.chat_id)
+    if len(h) > CHAT_HISTORY_MAX:
+        del h[: len(h) - CHAT_HISTORY_MAX]
+
+
+async def sum_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """總結最近 N 句聊天記錄：/sum [N]"""
+    n = 100
+    if context.args and context.args[0].isdigit():
+        n = max(5, min(int(context.args[0]), CHAT_HISTORY_MAX))
+    h = chat_hist(context, update.effective_chat.id)[-n:]
+    if not h:
+        await update.message.reply_text(
+            "暫時冇聊天記錄可以總結。\n"
+            "（Bot 要喺 @BotFather 關閉 Group Privacy 先能記錄群組訊息）")
+        return
+
+    status = await update.message.reply_text(f"📝 總結最近 {len(h)} 句…")
+    try:
+        lines = [f"[{m['name']}] {m['text']}" for m in h]
+        transcript = "\n".join(lines)
+        resp = await loop_run(lambda: client.chat.completions.create(
+            model=VISION_MODEL,
+            messages=[
+                {"role": "system", "content":
+                 "你是一個群組聊天總結助手。用繁體中文（廣東話口吻）輸出簡潔總結："
+                 "主要話題、討論要點、有共識的決定、未解決的問題。用 bullet list。"},
+                {"role": "user", "content": f"請總結以下聊天記錄：\n\n{transcript}"}],
+            max_tokens=1024))
+        summary = resp.choices[0].message.content.strip()
+        await status.edit_text(f"📝 **最近 {len(h)} 句總結**\n\n{summary[:4000]}",
+                               parse_mode="Markdown")
+    except Exception as e:
+        log.exception("sum failed")
+        await status.edit_text(f"❌ 總結失敗：{str(e)[:400]}")
 
 
 def main():
@@ -167,6 +223,8 @@ def main():
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("draw", draw_command))
     app.add_handler(CommandHandler("redraw", redraw_command))
+    app.add_handler(CommandHandler("sum", sum_command))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, record_message))
     log.info("Draw bot started")
     app.run_polling()
 
