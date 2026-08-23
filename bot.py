@@ -242,13 +242,15 @@ async def sum_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines = [f"[{m['name']}] {m['text']}" for m in h]
         transcript = "\n".join(lines)
         system_prompt = (
-            "你是一個群組聊天總結助手。用繁體中文書面語輸出簡潔總結（不要口語或粵語用詞）："
-            "主要話題、討論要點、有共識的決定、未解決的問題。用 bullet list。")
+            "你是一個群組聊天總結助手。用繁體中文書面語輸出簡潔總結（不要口語或粵語用詞），"
+            "總字數嚴格限制在120字以內：主要話題、討論要點、決定、未解決問題。用 bullet list。")
         raw = await _chat_complete(context, system_prompt,
-                                   f"請總結以下聊天記錄：\n\n{transcript}")
+                                   f"請總結以下聊天記錄：\n\n{transcript}",
+                                   max_tokens=300)
         summary = (raw or "").strip() or "（模型冇返回內容，試多次或者減少條數）"
-        await status.edit_text(f"📝 **最近 {len(h)} 句總結**\n\n{summary[:4000]}",
-                               parse_mode="Markdown")
+        summary = summary[:120]
+        await status.edit_text(f"📝 最近 {len(h)} 句總結\n\n{summary[:4000]}",
+                               disable_web_page_preview=True)
     except Exception as e:
         log.exception("sum failed")
         await status.edit_text(f"❌ 總結失敗：{str(e)[:400]}")
