@@ -17,6 +17,10 @@ SENSENOVA_BASE_URL = "https://token.sensenova.cn/v1"
 IMAGE_MODEL = "sensenova-u1-fast"
 VISION_MODEL = "sensenova-6.7-flash-lite"
 SUMMARY_MODEL = "deepseek-v4-flash"  # 非 reasoning 模型，/sum 用（flash-lite 燒晒 tokens 喺 thinking）
+# fallback：SenseNova 429 時改用 opencode zen（keyless 額度）
+FALLBACK_BASE_URL = "https://opencode.ai/zen/v1"
+FALLBACK_API_KEY = os.environ.get("OPENCODE_API_KEY", "")
+FALLBACK_MODEL = "nemotron-3-ultra-free"
 
 # 比例快捷映射 → SenseNova 支持的尺寸
 SIZES = {
@@ -216,6 +220,23 @@ async def sum_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await asyncio.sleep(15 * (attempt + 1))
                 else:
                     raise
+        # fallback：SenseNova 仍然 429 → opencode zen
+        if raw is None:
+            try:
+                fb = AsyncOpenAI(api_key=FALLBACK_API_KEY or "x",
+                                 base_url=FALLBACK_BASE_URL)
+                resp = await fb.chat.completions.create(
+                    model=FALLBACK_MODEL,
+                    messages=[
+                        {"role": "system", "content":
+                         "你是一個群組聊天總結助手。用繁體中文書面語輸出簡潔總結（不要口語或粵語用詞）："
+                         "主要話題、討論要點、有共識的決定、未解決的問題。用 bullet list。"},
+                        {"role": "user", "content": f"請總結以下聊天記錄：\n\n{transcript}"}],
+                    max_tokens=1024)
+                raw = resp.choices[0].message.content
+            except Exception as e:
+                log.exception("fallback failed")
+                raise RuntimeError(f"SenseNova 同 fallback 都失敗：{e}") from e
         summary = (raw or "").strip() or "（模型冇返回內容，試多次或者減少條數）"
         await status.edit_text(f"📝 **最近 {len(h)} 句總結**\n\n{summary[:4000]}",
                                parse_mode="Markdown")
