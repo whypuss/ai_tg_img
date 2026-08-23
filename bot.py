@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Telegram /draw bot — SenseNova sensenova-u1-fast 生圖"""
+import asyncio
 import base64
 import io
 import logging
