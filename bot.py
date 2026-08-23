@@ -7,7 +7,7 @@ import logging
 import os
 
 import httpx
-from openai import OpenAI
+from openai import AsyncOpenAI
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 
@@ -32,12 +32,7 @@ logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("drawbot")
 
-client = OpenAI(api_key=SENSENOVA_API_KEY, base_url=SENSENOVA_BASE_URL)
-
-
-async def loop_run(fn):
-    """同步 openai SDK 調用放 executor，避免阻塞 event loop"""
-    return await asyncio.get_running_loop().run_in_executor(None, fn)
+client = AsyncOpenAI(api_key=SENSENOVA_API_KEY, base_url=SENSENOVA_BASE_URL)
 
 
 async def download_image(item):
@@ -72,8 +67,8 @@ async def draw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     status = await update.message.reply_text("🎨 生成中，請稍候…")
     try:
-        item = (await loop_run(lambda: client.images.generate(
-            model=IMAGE_MODEL, prompt=prompt, n=1, size=size))).data[0]
+        item = (await client.images.generate(
+            model=IMAGE_MODEL, prompt=prompt, n=1, size=size)).data[0]
 
         caption = f"🎨 {prompt}"
         photo = await download_image(item)
@@ -129,8 +124,7 @@ async def redraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         b64 = base64.b64encode(img).decode()
 
         # 1) 用視覺模型分析原圖 → 詳細描述 prompt
-        vision = await loop_run(
-            lambda: client.chat.completions.create(
+        vision = await client.chat.completions.create(
                 model=VISION_MODEL,
                 messages=[{"role": "user", "content": [
                     {"type": "text", "text":
@@ -138,13 +132,13 @@ async def redraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                      "輸出純描述，不要開場白。"},
                     {"type": "image_url",
                      "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}],
-                max_tokens=1024))
+                max_tokens=1024)
         base_desc = vision.choices[0].message.content.strip()
 
         # 2) 原圖描述 + 用戶改動要求 → 生圖
         full_prompt = f"{base_desc}. Modification: {prompt}"
-        resp = await loop_run(lambda: client.images.generate(
-            model=IMAGE_MODEL, prompt=full_prompt[:4000], n=1, size="2048x2048"))
+        resp = await client.images.generate(
+            model=IMAGE_MODEL, prompt=full_prompt[:4000], n=1, size="2048x2048")
         item = resp.data[0]
         photo = await download_image(item)
         photo.name = "image.png"
@@ -203,14 +197,14 @@ async def sum_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         lines = [f"[{m['name']}] {m['text']}" for m in h]
         transcript = "\n".join(lines)
-        resp = await loop_run(lambda: client.chat.completions.create(
+        resp = await client.chat.completions.create(
             model=SUMMARY_MODEL,
             messages=[
                 {"role": "system", "content":
                  "你是一個群組聊天總結助手。用繁體中文（廣東話口吻）輸出簡潔總結："
                  "主要話題、討論要點、有共識的決定、未解決的問題。用 bullet list。"},
                 {"role": "user", "content": f"請總結以下聊天記錄：\n\n{transcript}"}],
-            max_tokens=1024))
+            max_tokens=1024)
         raw = resp.choices[0].message.content
         summary = (raw or "").strip() or "（模型冇返回內容，試多次或者減少條數）"
         await status.edit_text(f"📝 **最近 {len(h)} 句總結**\n\n{summary[:4000]}",
