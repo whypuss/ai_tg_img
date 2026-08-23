@@ -16,6 +16,7 @@ SENSENOVA_API_KEY = os.environ["SENSENOVA_API_KEY"]
 SENSENOVA_BASE_URL = "https://token.sensenova.cn/v1"
 IMAGE_MODEL = "sensenova-u1-fast"
 VISION_MODEL = "sensenova-6.7-flash-lite"
+SUMMARY_MODEL = "deepseek-v4-flash"  # 非 reasoning 模型，/sum 用（flash-lite 燒晒 tokens 喺 thinking）
 
 # 比例快捷映射 → SenseNova 支持的尺寸
 SIZES = {
@@ -203,7 +204,7 @@ async def sum_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines = [f"[{m['name']}] {m['text']}" for m in h]
         transcript = "\n".join(lines)
         resp = await loop_run(lambda: client.chat.completions.create(
-            model=VISION_MODEL,
+            model=SUMMARY_MODEL,
             messages=[
                 {"role": "system", "content":
                  "你是一個群組聊天總結助手。用繁體中文（廣東話口吻）輸出簡潔總結："
