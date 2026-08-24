@@ -375,7 +375,7 @@ async def _auto_answer(update: Update, context: ContextTypes.DEFAULT_TYPE,
     try:
         # 10% 機率發貼圖代替文字
         STICKER_FILE_IDS = [
-            "CAACAgUAAxkBAAEL...",  # 在這裡填入貼圖 file_id
+            "CAACAgUAAxkBAAFSkSdqi-L-JRDzKVGBBifAaH9kauNCOgACMBIAAnWzWFfMKrxDZ-htzj0E",  # 魚魚魚貼圖包
         ]
         
         if STICKER_FILE_IDS and random.random() < 0.3:
@@ -466,7 +466,8 @@ async def chatter_loop(context: ContextTypes.DEFAULT_TYPE):
             try:
                 # 10% 機率發貼圖代替文字
                 STICKER_FILE_IDS = [
-                    "CAACAgUAAxkBAAEL...",  # 在這裡填入貼圖 file_id
+                    "CAACAgUAAxkBAAFSkSdqi-L-JRDzKVGBBifAaH9kauNCOgACMBIAAnWzWFfMKrxDZ-htzj0E",  # 魚魚魚貼圖包
+                    "CAACAgEAAxkBAAFSkTFqi-NQs3Z6dF4lDS4KM7MO_nMvMgACxwYAAl5W0EaNDg941gy6FD0E",  # Motionless_Aquamarine_Impala
                 ]
 
                 if STICKER_FILE_IDS and random.random() < 0.3:
