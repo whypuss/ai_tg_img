@@ -370,8 +370,9 @@ async def _auto_answer(update: Update, context: ContextTypes.DEFAULT_TYPE,
         user_msg = f"有人喺群組講咗：「{target_text[:500]}」\n請用最多30字回應。"
         raw = await _chat_complete(context, system_prompt, user_msg, max_tokens=100)
         answer = (raw.strip() or "（冇答案）")[:60]
-        # quote=False 唔好回條鏈到其他訊息
-        await update.message.reply_text(f"🤖 {answer}", quote=False)
+        # 用 bot.send_message 直接發，唔會成為 reply
+        await context.bot.send_message(chat_id=update.message.chat_id,
+                                        text=f"🤖 {answer}")
     except Exception as e:
         log.exception("auto_answer failed")
 
@@ -414,8 +415,10 @@ async def chatter_loop(context: ContextTypes.DEFAULT_TYPE):
     INTERVAL = 45 * 60
 
     def in_window() -> bool:
-        h = datetime.now().hour
-        return h >= 11 or h <= 1  # 11–23 or 0–1
+        # 用戶要求香港時間 11:00AM–02:00AM next day（UTC+8）
+        hk = datetime.now() + timedelta(hours=8)
+        h = hk.hour
+        return h >= 11 or h <= 1  # HK 11–23 or 0–1
 
     while True:
         chat_hist_data = context.bot_data.get("chat_history", {})
@@ -444,12 +447,14 @@ async def chatter_loop(context: ContextTypes.DEFAULT_TYPE):
                 log.exception("chatter failed")
             await asyncio.sleep(INTERVAL)
         else:
-            now = datetime.now()
-            if now.hour < 11:
-                target = now.replace(hour=11, minute=0, second=0, microsecond=0)
-            else:
-                target = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-            wait = max(60, int((target - now).total_seconds()))
+            # Off window: HK 2–10 (UTC 18:00–02:00)
+            hk = datetime.now() + timedelta(hours=8)
+            # 跳到 HK 11:00 = UTC 03:00
+            now_utc = datetime.now()
+            target = now_utc.replace(hour=3, minute=0, second=0, microsecond=0)
+            if target <= now_utc:
+                target = (now_utc + timedelta(days=1)).replace(hour=3, minute=0, second=0, microsecond=0)
+            wait = max(60, int((target - now_utc).total_seconds()))
             log.info("chatter idle, next window in %ds", wait)
             await asyncio.sleep(wait)
 
