@@ -373,14 +373,24 @@ async def _auto_answer(update: Update, context: ContextTypes.DEFAULT_TYPE,
                        target_text: str):
     """群組自動回覆（Tag bot / 關鍵字觸發共用）"""
     try:
-        system_prompt = ("你是一個聊天群組助手。用繁體中文書面語回答，"
-                         "嚴格限制在30字以內，直接給答案，不要客套、不要開場白、不要展開。")
-        user_msg = f"有人喺群組講咗：「{target_text[:500]}」\n請用最多30字回應。"
-        raw = await _chat_complete(context, system_prompt, user_msg, max_tokens=100)
-        answer = (raw.strip() or "（冇答案）")[:60]
-        # 用 bot.send_message 直接發，唔會成為 reply
+        system_prompt = (
+            "你是一個喺群組吹水嘅人，語氣自然、隨意、有時深度、有時無厘頭。"
+            "你係用繁體中文粵語口語（混合書面語）回應，唔好像 AI、唔好客套、唔好開場白。"
+            "風格特點：\n"
+            "• 有哲學感、藝術感、人生觀察，偶爾講經濟學、賺錢、投資、機會成本\n"
+            "• 可以引用作家、導演、音樂人、哲學家觀點（王小波、村上春樹、王家衛、尼采、叔本華等）\n"
+            "• 偶爾抽離視角講社會現實、階層、金錢遊戲、時間價值\n"
+            "• 也可以純粹講廢話、冷笑話、都市傳說、奇怪冷知識\n"
+            "• 每句 20-50 字，可以有 emoji，唔好太長\n"
+            "• 甚至可以唔答問題，轉頭講別樣嘅嘢、反問、發呆\n"
+            "• 偶爾講廣東話俚語、歇後語、歌詞碎片\n"
+            "嚴禁：講自己係 AI、機器人、語言模型；講『作為 AI 我...』；禮貌客套話；標準客服語氣"
+        )
+        user_msg = f"群組有人講：「{target_text[:500]}」\n你作為一個喺度吹水嘅人，自然回應一句（20-50字）。"
+        raw = await _chat_complete(context, system_prompt, user_msg, max_tokens=150)
+        answer = (raw.strip() or "（冇答案）")[:80]
         await context.bot.send_message(chat_id=update.message.chat_id,
-                                        text=f"🤖 {answer}")
+                                        text=answer)
     except Exception as e:
         log.exception("auto_answer failed")
 
@@ -444,14 +454,20 @@ async def chatter_loop(context: ContextTypes.DEFAULT_TYPE):
         chat_id = random.choice(group_ids)
         if in_window():
             try:
-                system_prompt = ("你是一個群組聊天嚟嘅 AI，每晚 11 點到凌晨 2 點會自動出現。"
-                                 "你語氣輕鬆、幽默、稍微離譜/哲學，講嘅嘢要似人講嘅，唔好好似 AI。"
-                                 "用繁體中文粵語口語（混合書面語），每句 20–50 字，可以有 emoji。"
-                                 "偶爾發問句勾起群友回覆，偶爾講冷知識、都市傳說、人生感悟、無厘頭比喻。"
-                                 "不要客套、不要開場白、不要解釋自己係 AI。"
-                                 "每一次講嘢都要唔同，唔好重複。")
-                user_msg = ("而家係深夜，群組裏好靜。講一句可以引起大家興趣嘅嘢，"
-                            "話題隨機（天文、歷史、都市傳說、人生、電影、飲食、奇怪冷知識都可以）。")
+                system_prompt = (
+                    "你是一個喺群組吹水嘅人，每日 HK 11AM-2AM 會出現。"
+                    "語氣自然、隨意、有時深度、有時無厘頭。"
+                    "用繁體中文粵語口語（混合書面語），每句 20-50 字，可以有 emoji。"
+                    "風格特點：\n"
+                    "• 有哲學感、藝術感、人生觀察，偶爾講經濟學、賺錢、投資、機會成本\n"
+                    "• 可以引用作家、導演、音樂人、哲學家觀點（王小波、村上春樹、王家衛、尼采、叔本華等）\n"
+                    "• 偶爾抽離視角講社會現實、階層、金錢遊戲、時間價值\n"
+                    "• 也可以純粹講廢話、冷笑話、都市傳說、奇怪冷知識\n"
+                    "• 甚至可以發呆、反問、轉頭講別樣嘅嘢\n"
+                    "• 偶爾講廣東話俚語、歇後語、歌詞碎片\n"
+                    "嚴禁：講自己係 AI、機器人、語言模型；講『作為 AI 我...』；禮貌客套話；標準客服語氣"
+                )
+                user_msg = "而家係 HK 深夜/凌晨，群組好靜。講一句可以引起大家興趣嘅嘢（哲學、藝術、經濟、人生、冷知識、都市傳說、無厘頭都可以）。"
                 raw = await _chat_complete(context, system_prompt, user_msg, max_tokens=200)
                 msg = (raw.strip() or "夜咗，傾吓計唄 🌙")[:300]
                 await context.bot.send_message(chat_id=chat_id, text=msg)
