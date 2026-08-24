@@ -12,8 +12,10 @@ from datetime import datetime, timedelta
 
 import httpx
 from openai import AsyncOpenAI
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (ApplicationBuilder, CallbackQueryHandler, CommandHandler,
+                          ContextTypes, MessageHandler, filters)
+from urllib.parse import urlparse
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 SENSENOVA_API_KEY = os.environ["SENSENOVA_API_KEY"]
@@ -199,6 +201,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                     "圖生圖：回覆一張圖 + /redraw <想點改>\n"
                                     "總結聊天記錄：/sum [條數，預設200]\n"
                                     "問答：/ans <問題>\n"
+                                    "搜歌（播放+下載）：/song <歌名或歌手>\n"
                                     "朗讀：/say（普通話）/sayc（粵語）<文字>")
 
 
@@ -364,6 +367,248 @@ async def ans_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         log.exception("ans failed")
         await status.edit_text(f"❌ 失敗：{str(e)[:200]}")
+
+
+# ================= 音樂搜索 /song =================
+# 音源 = GD Music API（同 whymusicall 插件：joox/netease/kuwo/bilibili 四子源）
+GD_API = "https://music-api.gdstudio.xyz/api.php"
+GD_SOURCES = ["joox", "netease", "kuwo", "bilibili"]
+GD_BITRATES = [320, 128]  # 音質降級階梯
+AUDIO_SUFFIXES = {".mp3", ".m4a", ".flac", ".wav", ".ogg", ".aac", ".opus"}
+
+
+async def _gd_get(params: dict):
+    """打 GD 上游。失敗拋異常。"""
+    async with httpx.AsyncClient(timeout=40) as hc:
+        r = await hc.get(GD_API, params=params)
+    data = r.json()
+    if r.status_code >= 400 or (isinstance(data, dict) and data.get("detail")):
+        raise ValueError(str((data or {}).get("detail") or r.status_code))
+    return data
+
+
+def _gd_song(raw) -> dict:
+    """GD 原始歌曲 → 統一 dict（冇 id 或冇歌名就丟）"""
+    sid = str(raw.get("url_id") or raw.get("id") or "")
+    name = str(raw.get("name") or "").strip()
+    if not sid or not name:
+        return None
+    artist = raw.get("artist")
+    if isinstance(artist, list):
+        artist = " / ".join(str(a) for a in artist if a)
+    else:
+        artist = str(artist or "").strip()
+    return {"id": sid, "source": str(raw.get("source") or ""),
+            "name": name, "artist": artist,
+            "album": str(raw.get("album") or "")}
+
+
+def _norm(s: str) -> str:
+    """歸一化比對用：去小寫、去非中英數字元"""
+    return re.sub(r"[^a-z0-9\u4e00-\u9fff]", "", (s or "").lower())
+
+
+async def _gd_search(keyword: str) -> list:
+    """四子源並發搜索，同名同歌手去重（保留先出現嗰個）"""
+    async def _one(source):
+        try:
+            data = await _gd_get({"types": "search", "source": source,
+                                  "name": keyword, "count": 8, "pages": 1})
+            return source, data
+        except Exception as e:
+            log.warning("song search %s failed: %s", source, e)
+            return source, []
+
+    results = await asyncio.gather(*[_one(s) for s in GD_SOURCES])
+    songs, seen = [], set()
+    for source, data in results:
+        if not isinstance(data, list):
+            continue
+        for raw in data:
+            song = _gd_song(raw)
+            if not song:
+                continue
+            key = (_norm(song["name"]), _norm(song["artist"]))
+            if key in seen:
+                continue
+            seen.add(key)
+            songs.append(song)
+    return songs
+
+
+async def _gd_url(source: str, sid: str) -> str:
+    """解音源 URL：320 → 128 逐級試"""
+    for br in GD_BITRATES:
+        try:
+            data = await _gd_get({"types": "url", "source": source,
+                                  "id": sid, "br": br})
+        except Exception as e:
+            log.warning("url fail %s/%s br=%s: %s", source, sid, br, e)
+            continue
+        url = (data or {}).get("url") or ""
+        if url:
+            return url
+    return ""
+
+
+async def _resolve_song(song: dict):
+    """原源解唔到就去其餘子源搵同一首歌再解（whymusicall resolveUrl 思路）"""
+    url = await _gd_url(song["source"], song["id"])
+    if url:
+        return url, song["source"]
+    keyword = f"{song['name']} {song['artist']}".strip()
+    target = _norm(song["name"])
+    for source in GD_SOURCES:
+        if source == song["source"]:
+            continue
+        try:
+            data = await _gd_get({"types": "search", "source": source,
+                                  "name": keyword, "count": 5, "pages": 1})
+        except Exception as e:
+            log.warning("fallback search %s failed: %s", source, e)
+            continue
+        if not isinstance(data, list):
+            continue
+        for raw in data:
+            cand = _gd_song(raw)
+            if not cand:
+                continue
+            cname = _norm(cand["name"])
+            if not (cname == target or (len(target) >= 2 and
+                                        (cname.startswith(target) or target.startswith(cname)))):
+                continue
+            cartist, artist = _norm(cand["artist"]), _norm(song["artist"])
+            if artist and cartist and artist not in cartist and cartist not in artist:
+                continue
+            url = await _gd_url(source, cand["id"])
+            if url:
+                return url, source
+    return "", ""
+
+
+def _audio_suffix(url: str, ctype: str) -> str:
+    suffix = os.path.splitext(urlparse(url).path)[1].lower()
+    if suffix in AUDIO_SUFFIXES:
+        return suffix
+    if "m4a" in ctype:
+        return ".m4a"
+    if "flac" in ctype:
+        return ".flac"
+    if "wav" in ctype:
+        return ".wav"
+    if "ogg" in ctype:
+        return ".ogg"
+    return ".mp3"
+
+
+async def _download_audio(url: str):
+    """下載音頻到 BytesIO。>45MB 或失敗回傳 (None, "")"""
+    try:
+        async with httpx.AsyncClient(timeout=180, follow_redirects=True) as hc:
+            async with hc.stream("GET", url) as r:
+                r.raise_for_status()
+                buf = io.BytesIO()
+                async for chunk in r.aiter_bytes(64 * 1024):
+                    buf.write(chunk)
+                    if buf.tell() > 45 * 1024 * 1024:
+                        return None, ""
+        buf.seek(0)
+        return buf, r.headers.get("content-type", "")
+    except Exception as e:
+        log.warning("audio download failed: %s", e)
+        return None, ""
+
+
+async def song_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyword = " ".join(context.args).strip()
+    reply = update.message.reply_to_message
+    if not keyword and reply and (reply.text or "").strip():
+        keyword = " ".join((reply.text or "").split())[:100]
+    if not keyword:
+        await update.message.reply_text(
+            "用法：/song <關鍵字>（最多 3 個結果）\n"
+            "例：/song 浮誇\n"
+            "或者回覆一句歌詞／歌名再打 /song")
+        return
+
+    status = await update.message.reply_text(f"🔍 搵緊「{keyword}」…")
+    try:
+        songs = await _gd_search(keyword)
+    except Exception as e:
+        log.exception("song search error")
+        await status.edit_text(f"❌ 搜索失敗：{str(e)[:200]}")
+        return
+    if not songs:
+        await status.edit_text(f"😿 搵唔到「{keyword}」相關嘅歌")
+        return
+
+    results = songs[:3]
+    context.user_data["song_results"] = results
+    lines = []
+    for i, s in enumerate(results, 1):
+        singer = f" — {s['artist']}" if s["artist"] else ""
+        lines.append(f"{i}. {s['name']}{singer}（{s['source']}）")
+    kb = [[InlineKeyboardButton(f"{i} ▶️ 播放", callback_data=f"song:p:{i-1}"),
+           InlineKeyboardButton(f"{i} ⬇️ 下載", callback_data=f"song:d:{i-1}")]
+          for i in range(1, len(results) + 1)]
+    text = f"🎵 「{keyword}」結果（{len(results)} 個）：\n\n" + \
+           "\n".join(lines) + "\n\n揀一個嚟播／下載👇"
+    await status.edit_text(text, reply_markup=InlineKeyboardMarkup(kb))
+
+
+async def song_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    try:
+        kind, idx_s = q.data.split(":")[1:]
+        idx = int(idx_s)
+    except (ValueError, IndexError):
+        await q.answer("❌ 連結失效，重新 /song", show_alert=True)
+        return
+    results = context.user_data.get("song_results") or []
+    if not (0 <= idx < len(results)):
+        await q.answer("❌ 結果已過期，重新 /song", show_alert=True)
+        return
+    song = results[idx]
+    chat_id = q.message.chat_id
+
+    status = await context.bot.send_message(chat_id, f"⏳ {song['name']}：搵緊音源…")
+    try:
+        url, source = await asyncio.wait_for(_resolve_song(song), timeout=90)
+        if not url:
+            await status.edit_text(f"❌ 「{song['name']}」所有子源都冇可播放音源")
+            return
+        buf, ctype = await _download_audio(url)
+        if buf is None:
+            await status.edit_text("❌ 下載音頻失敗（檔案太大或網絡問題）")
+            return
+
+        base = f"{song['name']} - {song['artist']}".strip(" -")
+        fname = re.sub(r'[\\/:*?"<>|\r\n]+', "_", base)[:80] or "song"
+        buf.name = fname + _audio_suffix(url, ctype)
+
+        if kind == "p":
+            await context.bot.send_audio(
+                chat_id=chat_id, audio=buf,
+                title=song["name"], performer=song["artist"] or None,
+                caption=f"🎵 {song['name']}" +
+                        (f" — {song['artist']}" if song["artist"] else ""))
+        else:
+            await context.bot.send_document(
+                chat_id=chat_id, document=buf,
+                filename=buf.name,
+                caption=f"⬇️ {song['name']}" +
+                        (f" — {song['artist']}" if song["artist"] else "") +
+                        f"\n源：{source}")
+        await status.delete()
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        log.exception("song callback failed")
+        try:
+            await status.edit_text(f"❌ 出錯：{str(e)[:200]}")
+        except Exception:
+            pass
 
 
 # ================= 自動問答 & 深夜胡說 =================
@@ -574,6 +819,8 @@ def main():
     app.add_handler(CommandHandler("say", say_command))
     app.add_handler(CommandHandler("sayc", sayc_command))
     app.add_handler(CommandHandler("ans", ans_command))
+    app.add_handler(CommandHandler("song", song_command))
+    app.add_handler(CallbackQueryHandler(song_callback, pattern="^song:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, auto_msg_handler))
     app.add_handler(MessageHandler(filters.Sticker.ALL & ~filters.FORWARDED, sticker_msg_handler))
     app.add_handler(MessageHandler(filters.ALL, chatter_bootstrap))
