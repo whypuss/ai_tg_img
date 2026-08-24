@@ -410,6 +410,14 @@ async def _auto_answer(update: Update, context: ContextTypes.DEFAULT_TYPE,
                                         text=answer)
     except Exception as e:
         log.exception("auto_answer failed")
+        # LLM 全掛 fallback：發貼圖代替，保證有反應
+        try:
+            if STICKER_FILE_IDS:
+                await context.bot.send_sticker(
+                    chat_id=update.message.chat_id,
+                    sticker=random.choice(STICKER_FILE_IDS))
+        except Exception:
+            log.exception("sticker fallback also failed")
 
 
 async def auto_msg_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
