@@ -22,7 +22,11 @@ IMAGE_MODEL = "sensenova-u1-fast"
 VISION_MODEL = "sensenova-6.7-flash-lite"
 SUMMARY_MODEL = "deepseek-v4-flash"
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "x")
+OPENCODE_API_KEY = os.environ.get("OPENCODE_API_KEY", "x")
+OPENCODE_BASE_URL = "https://opencode.ai/zen/v1"
 CHAT_MODEL_POOL = [
+    ("oc-nemotron", lambda: AsyncOpenAI(api_key=OPENCODE_API_KEY, base_url=OPENCODE_BASE_URL), "nemotron-3-ultra-free"),
+    ("oc-hy3",      lambda: AsyncOpenAI(api_key=OPENCODE_API_KEY, base_url=OPENCODE_BASE_URL), "hy3-free"),
     ("or-free",     lambda: AsyncOpenAI(api_key=OPENROUTER_API_KEY, base_url="https://openrouter.ai/api/v1"), "openrouter/free"),
     ("sn-deepseek", lambda: client, "deepseek-v4-flash"),
     ("sn-glm",      lambda: client, "glm-5.2"),
