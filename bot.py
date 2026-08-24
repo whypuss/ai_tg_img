@@ -811,7 +811,11 @@ async def chatter_bootstrap(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    # concurrent_updates: 預設 PTB 係順序處理更新（一個 handler 跑完先到下一個），
+    # AI 唸嘢時（/draw /sum /ans…）會令 /sing /say /貼圖回復全部排隊延遲。
+    # 開並行後每個 update 獨立 task，非 AI 功能即時回應。
+    app = (ApplicationBuilder().token(TELEGRAM_BOT_TOKEN)
+           .concurrent_updates(True).build())
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("draw", draw_command))
     app.add_handler(CommandHandler("redraw", redraw_command))
