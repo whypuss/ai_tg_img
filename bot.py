@@ -6,6 +6,9 @@ import io
 import json
 import logging
 import os
+import random
+import re
+from datetime import datetime, timedelta
 
 import httpx
 from openai import AsyncOpenAI
@@ -18,8 +21,6 @@ SENSENOVA_BASE_URL = "https://token.sensenova.cn/v1"
 IMAGE_MODEL = "sensenova-u1-fast"
 VISION_MODEL = "sensenova-6.7-flash-lite"
 SUMMARY_MODEL = "deepseek-v4-flash"
-# 模型輪詢池：分散 quota。429/空 content 自動跳下一個
-# 只用非 reasoning 模型（reasoning 模型 max_tokens 有限制會燒完喺 thinking 度）
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "x")
 CHAT_MODEL_POOL = [
     ("or-free",     lambda: AsyncOpenAI(api_key=OPENROUTER_API_KEY, base_url="https://openrouter.ai/api/v1"), "openrouter/free"),
@@ -28,7 +29,6 @@ CHAT_MODEL_POOL = [
     ("sn-6.7",      lambda: client, "sensenova-6.7-flash-lite"),
 ]
 
-# 全局輪詢計數器（bot_data 持久化，每個 request 輪轉）
 def _next_pool_idx(context: ContextTypes.DEFAULT_TYPE) -> int:
     idx = context.bot_data.get("pool_idx", 0)
     context.bot_data["pool_idx"] = (idx + 1) % len(CHAT_MODEL_POOL)
@@ -37,7 +37,6 @@ def _next_pool_idx(context: ContextTypes.DEFAULT_TYPE) -> int:
 async def _chat_complete(context: ContextTypes.DEFAULT_TYPE,
                          system_prompt: str, user_msg: str,
                          max_tokens: int = 1024) -> str:
-    """輪詢池調用：順序試每個模型，第一個成功返回，429/403 自動跳下一個"""
     start = _next_pool_idx(context)
     errors = []
     for i in range(len(CHAT_MODEL_POOL)):
@@ -55,13 +54,10 @@ async def _chat_complete(context: ContextTypes.DEFAULT_TYPE,
                 return raw.strip()
             errors.append(f"{label}: empty response")
         except Exception as e:
-            err = f"{label}: {e}"
-            log.warning("pool skip %s", err)
-            errors.append(err)
-            continue
+            log.warning("pool skip %s: %s", label, e)
+            errors.append(f"{label}: {e}")
     raise RuntimeError("所有模型輪詢完都失敗：" + " | ".join(errors[-5:]))
 
-# 比例快捷映射 → SenseNova 支持的尺寸
 SIZES = {
     "1:1": "2048x2048",
     "2:3": "1664x2496", "3:2": "2496x1664",
@@ -79,7 +75,6 @@ client = AsyncOpenAI(api_key=SENSENOVA_API_KEY, base_url=SENSENOVA_BASE_URL)
 
 
 async def download_image(item):
-    """SenseNova 返回 URL（1小時有效）→ 即刻下載；或 b64 解碼"""
     if getattr(item, "url", None):
         async with httpx.AsyncClient(timeout=120) as hc:
             r = await hc.get(item.url)
@@ -93,13 +88,10 @@ async def download_image(item):
 
 
 def parse_args(args):
-    """返回 (prompt, size)。比例可放開頭或結尾，如 /draw 9:16 一隻貓 或 /draw 一隻貓 9:16"""
     size = "2048x2048"
     items = list(args)
-    # 嘗試頭部
     if items and items[0] in SIZES:
         size = SIZES[items.pop(0)]
-    # 嘗試結尾
     elif items and items[-1] in SIZES:
         size = SIZES[items.pop()]
     return " ".join(items).strip(), size
@@ -117,12 +109,10 @@ async def draw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         item = (await client.images.generate(
             model=IMAGE_MODEL, prompt=prompt, n=1, size=size)).data[0]
-
         caption = f"🎨 {prompt}\n({size})"
         photo = await download_image(item)
         await update.message.reply_photo(photo=photo, caption=caption)
         await status.delete()
-
     except Exception as e:
         log.exception("generate failed")
         msg = str(e)
@@ -132,12 +122,11 @@ async def draw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def get_source_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """由回覆嘅訊息攞原圖 bytes，唔係回覆就返回 None"""
     msg = update.message
     reply = msg.reply_to_message
     if not reply:
         return None
-    photo = reply.photo or (reply.sticker if getattr(reply, "sticker", None) and not reply.sticker.is_animated else None)
+    photo = reply.photo
     doc = reply.document
     buf = io.BytesIO()
     if photo:
@@ -156,7 +145,6 @@ async def get_source_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def redraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """圖生圖：/redraw <改動描述>，回覆一張圖使用"""
     prompt = " ".join(context.args).strip()
     img = await get_source_image(update, context)
     if img is None:
@@ -170,8 +158,6 @@ async def redraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = await update.message.reply_text("🖌️ 圖生圖處理中…")
     try:
         b64 = base64.b64encode(img).decode()
-
-        # 1) 用視覺模型分析原圖 → 詳細描述 prompt
         vision = await client.chat.completions.create(
                 model=VISION_MODEL,
                 messages=[{"role": "user", "content": [
@@ -182,8 +168,6 @@ async def redraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                      "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}],
                 max_tokens=1024)
         base_desc = vision.choices[0].message.content.strip()
-
-        # 2) 原圖描述 + 用戶改動要求 → 生圖
         full_prompt = f"{base_desc}. Modification: {prompt}"
         resp = await client.images.generate(
             model=IMAGE_MODEL, prompt=full_prompt[:4000], n=1, size="2048x2048")
@@ -203,10 +187,11 @@ async def redraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Hi！用 /draw <描述> 生圖 🎨\n"
                                     "圖生圖：回覆一張圖 + /redraw <想點改>\n"
-                                    "總結聊天記錄：/sum [條數，預設100]")
+                                    "總結聊天記錄：/sum [條數，預設200]\n"
+                                    "問答：/ans <問題>\n"
+                                    "朗讀：/say（普通話）/sayc（粵語）<文字>")
 
 
-# ---------------- 聊天記錄總結（持久化到檔案，重啟不丟）----------------
 CHAT_HISTORY_MAX = 500
 CHAT_HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".chat_history.json")
 
@@ -233,7 +218,6 @@ def chat_hist(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> list:
 
 
 async def record_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """被動記錄每個 chat 嘅文字訊息（需要 Group Privacy off 先收齊）"""
     msg = update.message or update.edited_message
     if not msg or not msg.text or msg.text.startswith("/"):
         return
@@ -242,13 +226,11 @@ async def record_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     h.append({"name": name, "text": msg.text[:1000], "ts": int(msg.date.timestamp())})
     if len(h) > CHAT_HISTORY_MAX:
         del h[: len(h) - CHAT_HISTORY_MAX]
-    # 每 10 條保存一次，避免寫入太頻
     if len(h) % 10 == 0:
         _save_hist(context.bot_data["chat_history"])
 
 
 async def sum_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """總結最近 N 句聊天記錄：/sum [N]"""
     n = 200
     if context.args and context.args[0].isdigit():
         n = max(5, min(int(context.args[0]), CHAT_HISTORY_MAX))
@@ -287,13 +269,11 @@ async def sum_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status.edit_text(f"❌ 總結失敗：{str(e)[:400]}")
 
 
-# ---------------- TTS（Edge-TTS，免費）----------------
-VOICE_CANTONESE = "zh-HK-HiuMaanNeural"  # 粵語女聲
-VOICE_MANDARIN = "zh-CN-XiaoxiaoNeural"  # 普通話女聲
+VOICE_CANTONESE = "zh-HK-HiuMaanNeural"
+VOICE_MANDARIN = "zh-CN-XiaoxiaoNeural"
 
 
 async def _tts_stream(communicate):
-    """edge-tts 帶重試：TimeoutError / 網絡抖動時重連一次（音頻其實已收大部分）"""
     import edge_tts
     try:
         async for chunk in communicate.stream():
@@ -307,7 +287,6 @@ async def _tts_stream(communicate):
 async def tts_command(update: Update, context: ContextTypes.DEFAULT_TYPE, voice: str):
     text = " ".join(context.args).strip()
     if not text and update.message.reply_to_message:
-        # 回覆某句訊息 + /say → 自動朗讀該訊息文字
         text = (update.message.reply_to_message.text or "").strip()
     if not text:
         await update.message.reply_text(
@@ -315,13 +294,12 @@ async def tts_command(update: Update, context: ContextTypes.DEFAULT_TYPE, voice:
             "或者回覆一句訊息打 /say 自動朗讀，上限500字")
         return
 
+    buf = io.BytesIO()
     status = await update.message.reply_text("🔊 合成中…")
     try:
         text = text[:500]
         import edge_tts
-        # 回覆訊息可能好長 → 分段合成；超時重試一次
         communicate = edge_tts.Communicate(text, voice)
-        buf = io.BytesIO()
         async for attempt in _tts_stream(communicate):
             if attempt["type"] == "audio":
                 buf.write(attempt["data"])
@@ -331,7 +309,6 @@ async def tts_command(update: Update, context: ContextTypes.DEFAULT_TYPE, voice:
         await status.delete()
     except Exception as e:
         log.exception("tts failed")
-        # 音頻其實收到咗（只是串流尾超時）→ 照發
         if buf.tell() > 1000:
             buf.seek(0)
             buf.name = "speech.mp3"
@@ -350,7 +327,6 @@ async def sayc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def ans_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/ans 問答：回覆訊息 + /ans（加追問），或直接 /ans 問題"""
     question = " ".join(context.args).strip()
     reply = update.message.reply_to_message
     if not question and not reply:
@@ -381,6 +357,111 @@ async def ans_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status.edit_text(f"❌ 失敗：{str(e)[:200]}")
 
 
+# ================= 自動問答 & 深夜胡說 =================
+QUESTION_PATTERN = re.compile(r'[？?]|點解|點咁|點做|點整|係咩|咩係|邊個|邊度|唔知|為咩|點會|會唔會')
+
+
+async def _auto_answer(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                       target_text: str):
+    """群組自動回覆（Tag bot / 關鍵字觸發共用）"""
+    try:
+        system_prompt = ("你是一個聊天群組助手。用繁體中文書面語回答，"
+                         "嚴格限制在30字以內，直接給答案，不要客套、不要開場白、不要展開。")
+        user_msg = f"有人喺群組講咗：「{target_text[:500]}」\n請用最多30字回應。"
+        raw = await _chat_complete(context, system_prompt, user_msg, max_tokens=100)
+        answer = (raw.strip() or "（冇答案）")[:60]
+        # quote=False 唔好回條鏈到其他訊息
+        await update.message.reply_text(f"🤖 {answer}", quote=False)
+    except Exception as e:
+        log.exception("auto_answer failed")
+
+
+async def auto_msg_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """非 command 文字：記錄 + 群組自動檢測 tag bot / 問題關鍵字"""
+    msg = update.message
+    if not msg or not msg.text:
+        return
+
+    # 記錄聊天
+    name = msg.from_user.full_name if msg.from_user else "?"
+    h = chat_hist(context, msg.chat_id)
+    h.append({"name": name, "text": msg.text[:1000], "ts": int(msg.date.timestamp())})
+    if len(h) > CHAT_HISTORY_MAX:
+        del h[: len(h) - CHAT_HISTORY_MAX]
+    if len(h) % 10 == 0:
+        _save_hist(context.bot_data["chat_history"])
+
+    # 只在群組自動回覆
+    if msg.chat_id > 0:
+        return
+
+    text = msg.text.strip()
+    bot_username = (context.bot.username or "").lstrip("@")
+
+    # ① Tag bot 回覆
+    if bot_username and re.search(r'@' + re.escape(bot_username) + r'\b', text):
+        user_part = re.sub(r'@' + re.escape(bot_username) + r'\s*', '', text).strip()
+        await _auto_answer(update, context, user_part or "hi")
+        return
+
+    # ② 問題關鍵字觸發
+    if QUESTION_PATTERN.search(text):
+        await _auto_answer(update, context, text)
+
+
+async def chatter_loop(context: ContextTypes.DEFAULT_TYPE):
+    """背景：每日 11:00–02:00（跨日）每 45 分鐘喺群組講一句廢話"""
+    INTERVAL = 45 * 60
+
+    def in_window() -> bool:
+        h = datetime.now().hour
+        return h >= 11 or h <= 1  # 11–23 or 0–1
+
+    while True:
+        chat_hist_data = context.bot_data.get("chat_history", {})
+        group_ids = [int(cid) for cid in chat_hist_data
+                     if chat_hist_data[cid] and int(cid) < 0]
+        if not group_ids:
+            await asyncio.sleep(60)
+            continue
+
+        chat_id = random.choice(group_ids)
+        if in_window():
+            try:
+                system_prompt = ("你是一個群組聊天嚟嘅 AI，每晚 11 點到凌晨 2 點會自動出現。"
+                                 "你語氣輕鬆、幽默、稍微離譜/哲學，講嘅嘢要似人講嘅，唔好好似 AI。"
+                                 "用繁體中文粵語口語（混合書面語），每句 20–50 字，可以有 emoji。"
+                                 "偶爾發問句勾起群友回覆，偶爾講冷知識、都市傳說、人生感悟、無厘頭比喻。"
+                                 "不要客套、不要開場白、不要解釋自己係 AI。"
+                                 "每一次講嘢都要唔同，唔好重複。")
+                user_msg = ("而家係深夜，群組裏好靜。講一句可以引起大家興趣嘅嘢，"
+                            "話題隨機（天文、歷史、都市傳說、人生、電影、飲食、奇怪冷知識都可以）。")
+                raw = await _chat_complete(context, system_prompt, user_msg, max_tokens=200)
+                msg = (raw.strip() or "夜咗，傾吓計唄 🌙")[:300]
+                await context.bot.send_message(chat_id=chat_id, text=msg)
+                log.info("chatter → %s: %s", chat_id, msg[:40])
+            except Exception as e:
+                log.exception("chatter failed")
+            await asyncio.sleep(INTERVAL)
+        else:
+            now = datetime.now()
+            if now.hour < 11:
+                target = now.replace(hour=11, minute=0, second=0, microsecond=0)
+            else:
+                target = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            wait = max(60, int((target - now).total_seconds()))
+            log.info("chatter idle, next window in %ds", wait)
+            await asyncio.sleep(wait)
+
+
+async def chatter_bootstrap(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """第一次啟動時建立 chatter 背景任務（一次性觸發）"""
+    if context.bot_data.get("chatter_started"):
+        return
+    context.bot_data["chatter_started"] = True
+    asyncio.create_task(chatter_loop(context))
+
+
 def main():
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start_command))
@@ -390,7 +471,8 @@ def main():
     app.add_handler(CommandHandler("say", say_command))
     app.add_handler(CommandHandler("sayc", sayc_command))
     app.add_handler(CommandHandler("ans", ans_command))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, record_message))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, auto_msg_handler))
+    app.add_handler(MessageHandler(filters.ALL, chatter_bootstrap))
     log.info("Draw bot started")
     app.run_polling()
 
