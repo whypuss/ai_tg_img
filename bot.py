@@ -51,13 +51,16 @@ async def _chat_complete(context: ContextTypes.DEFAULT_TYPE,
         label, client_fn, model = CHAT_MODEL_POOL[idx]
         try:
             c = client_fn()
-            resp = await c.chat.completions.create(
-                model=model,
-                messages=[{"role": "system", "content": system_prompt},
-                          {"role": "user", "content": user_msg}],
-                max_tokens=max_tokens)
+            # 每個模型最多等 25 秒，避免 429 retry 疊加令回應延遲幾分鐘
+            resp = await asyncio.wait_for(
+                c.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "system", "content": system_prompt},
+                              {"role": "user", "content": user_msg}],
+                    max_tokens=max_tokens),
+                timeout=25)
             raw = resp.choices[0].message.content
-            if raw:
+            if raw and raw.strip():
                 return raw.strip()
             errors.append(f"{label}: empty response")
         except Exception as e:
