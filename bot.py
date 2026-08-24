@@ -475,6 +475,25 @@ async def auto_msg_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _auto_answer(update, context, text, sticker_prob=0.7)
 
 
+async def sticker_msg_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """有人發貼圖 → 100% 回貼圖"""
+    msg = update.message
+    if not msg or not msg.sticker or msg.chat_id > 0:
+        return
+    # 記錄到聊天歷史
+    name = msg.from_user.full_name if msg.from_user else "?"
+    h = chat_hist(context, msg.chat_id)
+    h.append({"name": name, "text": "[贴图]", "ts": int(msg.date.timestamp())})
+    if len(h) > CHAT_HISTORY_MAX:
+        del h[: len(h) - CHAT_HISTORY_MAX]
+    # 100% 回貼圖（唔用自己個 file_id，用對方發嘅，似真人互動）
+    try:
+        await context.bot.send_sticker(chat_id=msg.chat_id,
+                                        sticker=msg.sticker.file_id)
+    except Exception:
+        log.exception("sticker reply failed")
+
+
 async def chatter_loop(context: ContextTypes.DEFAULT_TYPE):
     """背景：每日 11:00–02:00（跨日）每 45 分鐘喺群組講一句廢話"""
     INTERVAL = 45 * 60
@@ -552,6 +571,7 @@ def main():
     app.add_handler(CommandHandler("sayc", sayc_command))
     app.add_handler(CommandHandler("ans", ans_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, auto_msg_handler))
+    app.add_handler(MessageHandler(filters.Sticker.ALL & ~filters.FORWARDED, sticker_msg_handler))
     app.add_handler(MessageHandler(filters.ALL, chatter_bootstrap))
     log.info("Draw bot started")
     app.run_polling()
