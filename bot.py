@@ -266,9 +266,8 @@ async def sum_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "📌 未解決問題\n• 仍有分歧或未定之處")
         raw = await _chat_complete(context, system_prompt,
                                    f"請總結以下聊天記錄（注意保留關鍵資訊，不要過度壓縮）：\n\n{transcript}",
-                                   max_tokens=500)
+                                   max_tokens=2000)
         summary = (raw or "").strip() or "（模型冇返回內容，試多次或者減少條數）"
-        summary = summary[:300]
         await status.edit_text(f"📝 最近 {len(h)} 句總結\n\n{summary[:4000]}",
                                disable_web_page_preview=True)
     except Exception as e:
