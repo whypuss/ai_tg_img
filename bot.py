@@ -368,25 +368,24 @@ QUESTION_PATTERN = re.compile(
     r'|嗎|呢|吧|嘛|啊$'         # 語氣助詞結尾
 )
 
+# 貼圖池（模組級單一來源，_auto_answer 同 chatter_loop 共用，保證一致）
+STICKER_FILE_IDS = [
+    "CAACAgUAAxkBAAFSkSdqi-L-JRDzKVGBBifAaH9kauNCOgACMBIAAnWzWFfMKrxDZ-htzj0E",  # 魚魚魚
+    "CAACAgEAAxkBAAFSkTFqi-NQs3Z6dF4lDS4KM7MO_nMvMgACxwYAAl5W0EaNDg941gy6FD0E",  # Impala
+    "CAACAgEAAxkBAAFSkURqi-RKW1E4p9BaCRfB8daHKVP1XQACwQQAAgz70UbE4sUkroXwgT0E",  # 新增1
+    "CAACAgUAAxkBAAFSkfdqi_HQkwsoyRMHJQRVaMx97B_4iAACQxEAAvp44FcioNqUUIk5az0E",  # ncsbymhy
+    "CAACAgUAAxkBAAFSkf9qi_JpWp4Hwt-y6CI4sYhvSy3QtwACwhsAAqir6FYtmqaU2lczbz0E",  # superkekey
+]
+
 
 async def _auto_answer(update: Update, context: ContextTypes.DEFAULT_TYPE,
-                       target_text: str):
-    """群组自动回复（Tag bot / 关键字触发共用）"""
+                       target_text: str, sticker_prob: float = 0.2):
+    """群组自动回复。sticker_prob=貼圖機率，其餘發 LLM 文字（本函數一定有回應）"""
     try:
-        # 機率分布：40% 貼圖 / 20% LLM 文字 / 40% 無反應
-        STICKER_FILE_IDS = [
-            "CAACAgUAAxkBAAFSkSdqi-L-JRDzKVGBBifAaH9kauNCOgACMBIAAnWzWFfMKrxDZ-htzj0E",
-            "CAACAgEAAxkBAAFSkTFqi-NQs3Z6dF4lDS4KM7MO_nMvMgACxwYAAl5W0EaNDg941gy6FD0E",
-            "CAACAgEAAxkBAAFSkURqi-RKW1E4p9BaCRfB8daHKVP1XQACwQQAAgz70UbE4sUkroXwgT0E",
-        ]
-        
-        r = random.random()
-        if STICKER_FILE_IDS and r < 0.4:
+        if STICKER_FILE_IDS and random.random() < sticker_prob:
             sticker_id = random.choice(STICKER_FILE_IDS)
             await context.bot.send_sticker(chat_id=update.message.chat_id,
                                             sticker=sticker_id)
-            return
-        if r >= 0.6:
             return
 
         system_prompt = (
@@ -401,7 +400,8 @@ async def _auto_answer(update: Update, context: ContextTypes.DEFAULT_TYPE,
             "• 每句 20-50 字，可以有 emoji，别太长\n"
             "• 甚至可以不答问题、转头聊别的、反问、发呆\n"
             "• 偶尔用歇后语、歌词碎片\n"
-            "严禁：说自己是 AI、机器人、语言模型；说『作为 AI 我...』；礼貌客套话；标准客服语气"
+            "严禁：说自己是 AI、机器人、语言模型；说『作为 AI 我...』；礼貌客套话；标准客服语气\n"
+            "• 必须全程使用简体中文，禁止输出英文单词（如 Bitcoin/Trump/Fed 等），用中文表达"
         )
         user_msg = f"群里有人说：「{target_text[:500]}」\n你作为一个在场吹水的人，自然回应一句（20-50字）。"
         raw = await _chat_complete(context, system_prompt, user_msg, max_tokens=150)
@@ -434,20 +434,20 @@ async def auto_msg_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = msg.text.strip()
     bot_username = (context.bot.username or "").lstrip("@")
 
-    # ① Tag bot 回覆
+    # ① Tag bot 回覆（100% 回應：20% 貼圖 / 80% 文字）
     if bot_username and re.search(r'@' + re.escape(bot_username) + r'\b', text):
         user_part = re.sub(r'@' + re.escape(bot_username) + r'\s*', '', text).strip()
-        await _auto_answer(update, context, user_part or "hi")
+        await _auto_answer(update, context, user_part or "hi", sticker_prob=0.2)
         return
 
-    # ② 問題關鍵字觸發
+    # ② 問題關鍵字觸發（100% 回應：20% 貼圖 / 80% 文字）
     if QUESTION_PATTERN.search(text):
-        await _auto_answer(update, context, text)
+        await _auto_answer(update, context, text, sticker_prob=0.2)
         return
 
-    # ③ 隨機回覆（30% 機率，避免太吵）
-    if random.random() < 0.2:
-        await _auto_answer(update, context, text)
+    # ③ 路人隨機回覆（25% 機率會回；回時 70% 貼圖 / 30% 文字）
+    if random.random() < 0.25:
+        await _auto_answer(update, context, text, sticker_prob=0.7)
 
 
 async def chatter_loop(context: ContextTypes.DEFAULT_TYPE):
@@ -471,21 +471,12 @@ async def chatter_loop(context: ContextTypes.DEFAULT_TYPE):
         chat_id = random.choice(group_ids)
         if in_window():
             try:
-                # 機率分布：40% 貼圖 / 20% LLM 文字 / 40% 無反應
-                STICKER_FILE_IDS = [
-                    "CAACAgUAAxkBAAFSkSdqi-L-JRDzKVGBBifAaH9kauNCOgACMBIAAnWzWFfMKrxDZ-htzj0E",  # 魚魚魚貼圖包
-                    "CAACAgEAAxkBAAFSkTFqi-NQs3Z6dF4lDS4KM7MO_nMvMgACxwYAAl5W0EaNDg941gy6FD0E",  # Motionless_Aquamarine_Impala
-                    "CAACAgEAAxkBAAFSkURqi-RKW1E4p9BaCRfB8daHKVP1XQACwQQAAgz70UbE4sUkroXwgT0E",  # 新增貼圖
-                ]
-                r = random.random()
-                if STICKER_FILE_IDS and r < 0.4:
+                # 機率分布：40% 貼圖 / 60% LLM 文字
+                if STICKER_FILE_IDS and random.random() < 0.4:
                     sticker_id = random.choice(STICKER_FILE_IDS)
                     await context.bot.send_sticker(chat_id=chat_id,
                                                     sticker=sticker_id)
                     log.info("chatter sticker → %s: %s", chat_id, sticker_id)
-                    await asyncio.sleep(INTERVAL)
-                    continue
-                if r >= 0.6:
                     await asyncio.sleep(INTERVAL)
                     continue
 
@@ -501,7 +492,8 @@ async def chatter_loop(context: ContextTypes.DEFAULT_TYPE):
                     "• 也可以纯粹讲废话、冷笑话、都市传说、奇怪冷知识\n"
                     "• 甚至可以发呆、反问、转头聊别的\n"
                     "• 偶尔用歇后语、歌词碎片\n"
-                    "严禁：说自己是 AI、机器人、语言模型；说『作为 AI 我...』；礼貌客套话；标准客服语气"
+                    "严禁：说自己是 AI、机器人、语言模型；说『作为 AI 我...』；礼貌客套话；标准客服语气\n"
+                    "• 必须全程使用简体中文，禁止输出英文单词（如 Bitcoin/Trump/Fed 等），用中文表达"
                 )
                 user_msg = "现在是 HK 深夜/凌晨，群里好安静。说一句能引起大家兴趣的话（哲学、艺术、经济、美股、比特币、人生、冷知识、都市传说、无厘头都可以）。"
                 raw = await _chat_complete(context, system_prompt, user_msg, max_tokens=200)
