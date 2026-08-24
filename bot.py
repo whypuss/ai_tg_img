@@ -378,7 +378,7 @@ async def _auto_answer(update: Update, context: ContextTypes.DEFAULT_TYPE,
             "CAACAgUAAxkBAAEL...",  # 在這裡填入貼圖 file_id
         ]
         
-        if STICKER_FILE_IDS and random.random() < 0.1:
+        if STICKER_FILE_IDS and random.random() < 0.3:
             sticker_id = random.choice(STICKER_FILE_IDS)
             await context.bot.send_sticker(chat_id=update.message.chat_id,
                                             sticker=sticker_id)
@@ -469,7 +469,7 @@ async def chatter_loop(context: ContextTypes.DEFAULT_TYPE):
                     "CAACAgUAAxkBAAEL...",  # 在這裡填入貼圖 file_id
                 ]
 
-                if STICKER_FILE_IDS and random.random() < 0.1:
+                if STICKER_FILE_IDS and random.random() < 0.3:
                     sticker_id = random.choice(STICKER_FILE_IDS)
                     await context.bot.send_sticker(chat_id=chat_id,
                                                     sticker=sticker_id)
