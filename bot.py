@@ -201,7 +201,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                     "圖生圖：回覆一張圖 + /redraw <想點改>\n"
                                     "總結聊天記錄：/sum [條數，預設200]\n"
                                     "問答：/ans <問題>\n"
-                                    "搜歌（播放+下載）：/song <歌名或歌手>\n"
+                                    "搜歌（播放+下載）：/sing <歌名或歌手>\n"
                                     "朗讀：/say（普通話）/sayc（粵語）<文字>")
 
 
@@ -526,9 +526,9 @@ async def song_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyword = " ".join((reply.text or "").split())[:100]
     if not keyword:
         await update.message.reply_text(
-            "用法：/song <關鍵字>（最多 3 個結果）\n"
-            "例：/song 浮誇\n"
-            "或者回覆一句歌詞／歌名再打 /song")
+            "用法：/sing <關鍵字>（最多 3 個結果）\n"
+            "例：/sing 浮誇\n"
+            "或者回覆一句歌詞／歌名再打 /sing")
         return
 
     status = await update.message.reply_text(f"🔍 搵緊「{keyword}」…")
@@ -819,7 +819,7 @@ def main():
     app.add_handler(CommandHandler("say", say_command))
     app.add_handler(CommandHandler("sayc", sayc_command))
     app.add_handler(CommandHandler("ans", ans_command))
-    app.add_handler(CommandHandler("song", song_command))
+    app.add_handler(CommandHandler("sing", song_command))
     app.add_handler(CallbackQueryHandler(song_callback, pattern="^song:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, auto_msg_handler))
     app.add_handler(MessageHandler(filters.Sticker.ALL & ~filters.FORWARDED, sticker_msg_handler))
