@@ -358,7 +358,15 @@ async def ans_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ================= 自動問答 & 深夜胡說 =================
-QUESTION_PATTERN = re.compile(r'[？?]|點解|點咁|點做|點整|係咩|咩係|邊個|邊度|唔知|為咩|點會|會唔會')
+# 關鍵字觸發：中文/英文問號 + 常見粵語/普通話疑問詞/語氣詞
+QUESTION_PATTERN = re.compile(
+    r'[？?]'                    # 問號
+    r'|點解|點咁|點做|點整|點樣|點知|點得|點會|點先'  # 粵語點X
+    r'|係咩|咩係|咩嘢|咩事|邊個|邊度|邊條|邊隻|邊陣'   # 粵語疑問代詞
+    r'|唔知|唔明|唔識|為咩|點解|做咩|點會|會唔會|會唔會'  # 粵語疑問句
+    r'|什麼|為什麼|為何|如何|怎麼|怎樣|哪裡|哪兒|誰|甚麼'   # 普通話疑問詞
+    r'|嗎|呢|吧|嘛|啊$'         # 語氣助詞結尾
+)
 
 
 async def _auto_answer(update: Update, context: ContextTypes.DEFAULT_TYPE,
@@ -407,6 +415,11 @@ async def auto_msg_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ② 問題關鍵字觸發
     if QUESTION_PATTERN.search(text):
+        await _auto_answer(update, context, text)
+        return
+
+    # ③ 隨機回覆（30% 機率，避免太吵）
+    if random.random() < 0.3:
         await _auto_answer(update, context, text)
 
 
