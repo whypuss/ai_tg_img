@@ -479,6 +479,8 @@ async def sticker_msg_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     msg = update.message
     if not msg or not msg.sticker or msg.chat_id > 0:
         return
+    log.info("sticker_msg_handler triggered: chat=%s from=%s",
+             msg.chat_id, msg.from_user.full_name if msg.from_user else "?")
     # 記錄到聊天歷史
     name = msg.from_user.full_name if msg.from_user else "?"
     h = chat_hist(context, msg.chat_id)
