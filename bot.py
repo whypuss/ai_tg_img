@@ -385,6 +385,23 @@ STICKER_FILE_IDS = [
 ]
 
 
+# 話題池：每次回覆隨機抽一個，令內容類型分散
+CHAT_TOPICS = [
+    "聊经济话题：美股、比特币、特朗普政策、美联储、通胀、加密货币",
+    "讲一个冷笑话或冷知识",
+    "说一句有哲学感的人生观察",
+    "聊聊艺术、电影或音乐",
+    "讲一个都市传说或灵异小故事",
+    "发一下人生感慨，聊时间价值、机会成本",
+    "纯粹说句无厘头废话",
+    "用歇后语或歌词碎片回应",
+    "反问群里的人一个问题，引起讨论",
+    "聊赚钱路子、副业、投资心态",
+    "吐槽一下日常生活的小事",
+    "聊科技、AI、数码产品的观察",
+]
+
+
 async def _auto_answer(update: Update, context: ContextTypes.DEFAULT_TYPE,
                        target_text: str, sticker_prob: float = 0.2):
     """群组自动回复。sticker_prob=貼圖機率，其餘發 LLM 文字（本函數一定有回應）"""
@@ -395,20 +412,13 @@ async def _auto_answer(update: Update, context: ContextTypes.DEFAULT_TYPE,
                                             sticker=sticker_id)
             return
 
+        topic = random.choice(CHAT_TOPICS)
         system_prompt = (
-            "你是一个在群里吹水的人，语气自然、随意、有时深度、有时无厘头。"
+            "你是一个在群里吹水的人，语气自然、随意。"
             "你用简体中文普通话（混合书面语）回应，别像 AI、别客套、别开场白。"
-            "风格特点：\n"
-            "• 有哲学感、艺术感、人生观察\n"
-            "• 经常聊经济话题：美股、比特币、特朗普政策、美联储加息降息、美元走势、通胀、就业数据、加密货币、AI 概念股\n"
-            "• 可以聊赚钱路子、投资机会、经济周期、市场情绪\n"
-            "• 偶尔抽离视角聊社会现实、阶层、金钱游戏、时间价值\n"
-            "• 也可以纯粹讲废话、冷笑话、都市传说、奇怪冷知识\n"
+            f"这次你的话题方向：{topic}。\n"
             "• 每句 20-50 字，可以有 emoji，别太长\n"
-            "• 甚至可以不答问题、转头聊别的、反问、发呆\n"
-            "• 偶尔用歇后语、歌词碎片\n"
-            "严禁：说自己是 AI、机器人、语言模型；说『作为 AI 我...』；礼貌客套话；标准客服语气\n"
-            "• 必须全程使用简体中文，禁止输出英文单词（如 Bitcoin/Trump/Fed 等），用中文表达"
+            "严禁：说自己是 AI、机器人、语言模型；礼貌客套话；标准客服语气；输出英文单词"
         )
         user_msg = f"群里有人说：「{target_text[:500]}」\n你作为一个在场吹水的人，自然回应一句（20-50字）。"
         raw = await _chat_complete(context, system_prompt, user_msg, max_tokens=150)
@@ -495,22 +505,15 @@ async def chatter_loop(context: ContextTypes.DEFAULT_TYPE):
                     await asyncio.sleep(INTERVAL)
                     continue
 
+                topic = random.choice(CHAT_TOPICS)
                 system_prompt = (
                     "你是一个在群里吹水的人，每日 HK 11AM-2AM 会出现。"
-                    "语气自然、随意、有时深度、有时无厘头。"
+                    "语气自然、随意。"
                     "用简体中文普通话（混合书面语），每句 20-50 字，可以有 emoji。"
-                    "风格特点：\n"
-                    "• 有哲学感、艺术感、人生观察\n"
-                    "• 经常聊经济话题：美股、比特币、特朗普政策、美联储加息降息、美元走势、通胀、就业数据、加密货币、AI 概念股\n"
-                    "• 可以聊赚钱路子、投资机会、经济周期、市场情绪\n"
-                    "• 偶尔抽离视角聊社会现实、阶层、金钱游戏、时间价值\n"
-                    "• 也可以纯粹讲废话、冷笑话、都市传说、奇怪冷知识\n"
-                    "• 甚至可以发呆、反问、转头聊别的\n"
-                    "• 偶尔用歇后语、歌词碎片\n"
-                    "严禁：说自己是 AI、机器人、语言模型；说『作为 AI 我...』；礼貌客套话；标准客服语气\n"
-                    "• 必须全程使用简体中文，禁止输出英文单词（如 Bitcoin/Trump/Fed 等），用中文表达"
+                    f"这次你的话题方向：{topic}。\n"
+                    "严禁：说自己是 AI、机器人、语言模型；礼貌客套话；标准客服语气；输出英文单词"
                 )
-                user_msg = "现在是 HK 深夜/凌晨，群里好安静。说一句能引起大家兴趣的话（哲学、艺术、经济、美股、比特币、人生、冷知识、都市传说、无厘头都可以）。"
+                user_msg = "现在是 HK 深夜/凌晨，群里好安静。主动说一句引起大家兴趣的话。"
                 raw = await _chat_complete(context, system_prompt, user_msg, max_tokens=200)
                 msg = (raw.strip() or "夜了，聊两句 🌙")[:300]
                 await context.bot.send_message(chat_id=chat_id, text=msg)
