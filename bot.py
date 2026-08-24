@@ -521,6 +521,50 @@ async def _download_audio(url: str):
         return None, ""
 
 
+async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """搜索 Telegram 公開群組/頻道：本地 FTS5 優先，無結果再 SearXNG 發現"""
+    from tg_index.db import TGIndexDB, discover_and_index
+
+    query = " ".join(context.args).strip()
+    if not query:
+        await update.message.reply_text(
+            "用法：/find <關鍵字>\n"
+            "例：/find cantonese\n"
+            "搜索全球公開嘅 Telegram 群組/頻道")
+        return
+
+    status = await update.message.reply_text(f"🔍 搵緊「{query}」…")
+
+    try:
+        db = TGIndexDB()
+        # 1. 本地 FTS5 先
+        results = await db.search(query, limit=10)
+
+        # 2. 無結果或太少 → SearXNG 即時發現並入庫
+        if len(results) < 5:
+            await discover_and_index(query, db, max_results=15)
+            results = await db.search(query, limit=10)
+    except Exception as e:
+        log.exception("find search error")
+        await status.edit_text(f"❌ 搜索失敗：{str(e)[:200]}")
+        return
+
+    if not results:
+        await status.edit_text(f"😿 搵唔到「{query}」相關嘅群組/頻道")
+        return
+
+    lines = [f"🔎 「{query}」搵到 {len(results)} 個：\n"]
+    for r in results:
+        desc = (r.description or "")[:80]
+        lines.append(
+            f"📢 [{r.title}](https://t.me/{r.username})\n"
+            f"   👥 {r.members:,} 成員\n"
+            f"   {desc}")
+    lines.append("\n💡 資料庫會持續自動累積新群組")
+    await status.edit_text("\n".join(lines), parse_mode="Markdown",
+                           disable_web_page_preview=True)
+
+
 async def song_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyword = " ".join(context.args).strip()
     reply = update.message.reply_to_message
@@ -833,6 +877,7 @@ def main():
     app.add_handler(CommandHandler("sayc", sayc_command))
     app.add_handler(CommandHandler("ans", ans_command))
     app.add_handler(CommandHandler("sing", song_command))
+    app.add_handler(CommandHandler("find", find_command))
     app.add_handler(CallbackQueryHandler(song_callback, pattern="^song:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, auto_msg_handler))
     app.add_handler(MessageHandler(filters.Sticker.ALL & ~filters.FORWARDED, sticker_msg_handler))
