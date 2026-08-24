@@ -336,7 +336,7 @@ async def ans_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "  回覆訊息 + /ans  對別人嘅話追問")
         return
 
-    status = await update.message.reply_text("🤖 思考中…")
+    status = await update.message.reply_text("思考中…")
     try:
         system_prompt = ("你是一個聊天群組助手。用繁體中文書面語回答，"
                          "嚴格限制在30字以內，直接給答案，不要客套、不要開場白、不要展開。")
@@ -351,7 +351,7 @@ async def ans_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         raw = await _chat_complete(context, system_prompt, user_msg, max_tokens=100)
         answer = (raw.strip() or "（冇答案，試多次）")[:60]
-        await status.edit_text(f"🤖 {answer}")
+        await status.edit_text(answer)
     except Exception as e:
         log.exception("ans failed")
         await status.edit_text(f"❌ 失敗：{str(e)[:200]}")
