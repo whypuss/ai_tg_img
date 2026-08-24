@@ -375,6 +375,8 @@ GD_API = "https://music-api.gdstudio.xyz/api.php"
 GD_SOURCES = ["joox", "netease", "kuwo", "bilibili"]
 GD_BITRATES = [320, 128]  # 音質降級階梯
 AUDIO_SUFFIXES = {".mp3", ".m4a", ".flac", ".wav", ".ogg", ".aac", ".opus"}
+# 上傳 Telegram 嘅信號量：最多 2 個並行，避免慢上行同時塞爆再超時
+UPLOAD_SEM = asyncio.Semaphore(2)
 
 
 async def _gd_get(params: dict):
@@ -587,19 +589,20 @@ async def song_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         fname = re.sub(r'[\\/:*?"<>|\r\n]+', "_", base)[:80] or "song"
         buf.name = fname + _audio_suffix(url, ctype)
 
-        if kind == "p":
-            await context.bot.send_audio(
-                chat_id=chat_id, audio=buf,
-                title=song["name"], performer=song["artist"] or None,
-                caption=f"🎵 {song['name']}" +
-                        (f" — {song['artist']}" if song["artist"] else ""))
-        else:
-            await context.bot.send_document(
-                chat_id=chat_id, document=buf,
-                filename=buf.name,
-                caption=f"⬇️ {song['name']}" +
-                        (f" — {song['artist']}" if song["artist"] else "") +
-                        f"\n源：{source}")
+        async with UPLOAD_SEM:
+            if kind == "p":
+                await context.bot.send_audio(
+                    chat_id=chat_id, audio=buf,
+                    title=song["name"], performer=song["artist"] or None,
+                    caption=f"🎵 {song['name']}" +
+                            (f" — {song['artist']}" if song["artist"] else ""))
+            else:
+                await context.bot.send_document(
+                    chat_id=chat_id, document=buf,
+                    filename=buf.name,
+                    caption=f"⬇️ {song['name']}" +
+                            (f" — {song['artist']}" if song["artist"] else "") +
+                            f"\n源：{source}")
         await status.delete()
     except asyncio.CancelledError:
         raise
@@ -814,8 +817,14 @@ def main():
     # concurrent_updates: 預設 PTB 係順序處理更新（一個 handler 跑完先到下一個），
     # AI 唸嘢時（/draw /sum /ans…）會令 /sing /say /貼圖回復全部排隊延遲。
     # 開並行後每個 update 獨立 task，非 AI 功能即時回應。
+    # Timeout：PTB 預設 media write timeout=20s，上傳 10MB+ 音頻會 TimedOut，
+    # 放寬媒體上傳到 300s；pool 都有 30s 等位，並行時唔會池排隊超時。
     app = (ApplicationBuilder().token(TELEGRAM_BOT_TOKEN)
-           .concurrent_updates(True).build())
+           .concurrent_updates(True)
+           .read_timeout(60).write_timeout(120)
+           .media_write_timeout(300)
+           .connect_timeout(15).pool_timeout(30)
+           .build())
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("draw", draw_command))
     app.add_handler(CommandHandler("redraw", redraw_command))
