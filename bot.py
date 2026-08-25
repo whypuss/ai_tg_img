@@ -540,8 +540,8 @@ async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 1. 本地 FTS5 先
         results = await db.search(query, limit=10)
 
-        # 2. 無結果或太少 → SearXNG 即時發現並入庫
-        if len(results) < 5:
+        # 2. 無結果 → SearXNG 即時發現並入庫
+        if not results:
             await discover_and_index(query, db, max_results=15)
             results = await db.search(query, limit=10)
     except Exception as e:
@@ -770,7 +770,7 @@ async def auto_msg_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def sticker_msg_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """有人發貼圖 → 100% 回貼圖"""
+    """有人發貼圖 → 15% 回貼圖 / 85% 回文字"""
     msg = update.message
     if not msg or not msg.sticker or msg.chat_id > 0:
         return
@@ -782,12 +782,16 @@ async def sticker_msg_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     h.append({"name": name, "text": "[贴图]", "ts": int(msg.date.timestamp())})
     if len(h) > CHAT_HISTORY_MAX:
         del h[: len(h) - CHAT_HISTORY_MAX]
-    # 100% 回貼圖（唔用自己個 file_id，用對方發嘅，似真人互動）
-    try:
-        await context.bot.send_sticker(chat_id=msg.chat_id,
-                                        sticker=msg.sticker.file_id)
-    except Exception:
-        log.exception("sticker reply failed")
+    # 15% 回貼圖（唔用自己個 file_id，用對方發嘅，似真人互動）
+    if random.random() < 0.15:
+        try:
+            await context.bot.send_sticker(chat_id=msg.chat_id,
+                                            sticker=msg.sticker.file_id)
+        except Exception:
+            log.exception("sticker reply failed")
+    else:
+        # 85% 回文字（走 _auto_answer，sticker_prob=0 保證唔再發貼圖）
+        await _auto_answer(update, context, "發貼圖", sticker_prob=0.0)
 
 
 async def chatter_loop(context: ContextTypes.DEFAULT_TYPE):
