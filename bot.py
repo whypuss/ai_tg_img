@@ -759,8 +759,8 @@ async def auto_msg_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _auto_answer(update, context, user_part or "hi", sticker_prob=0.2)
         return
 
-    # ② 問題關鍵字觸發（30% 回應：20% 貼圖 / 80% 文字）
-    if QUESTION_PATTERN.search(text) and random.random() < 0.3:
+    # ② 問題關鍵字觸發（10% 回應：20% 貼圖 / 80% 文字）
+    if QUESTION_PATTERN.search(text) and random.random() < 0.1:
         await _auto_answer(update, context, text, sticker_prob=0.2)
         return
 
