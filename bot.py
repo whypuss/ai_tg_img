@@ -9,13 +9,13 @@ import os
 import random
 import re
 from datetime import datetime, timedelta
+from urllib.parse import urlparse, quote_plus
 
 import httpx
 from openai import AsyncOpenAI
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (ApplicationBuilder, CallbackQueryHandler, CommandHandler,
                           ContextTypes, MessageHandler, filters)
-from urllib.parse import urlparse
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 SENSENOVA_API_KEY = os.environ["SENSENOVA_API_KEY"]
@@ -202,6 +202,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                     "總結聊天記錄：/sum [條數，預設200]\n"
                                     "問答：/ans <問題>\n"
                                     "搜歌（播放+下載）：/sing <歌名或歌手>\n"
+                                    "Google 搜索：/G <關鍵詞>\n"
+                                    "搜 Telegram 群組：/find <關鍵字>\n"
                                     "朗讀：/say（普通話）/sayc（粵語）<文字>")
 
 
@@ -565,6 +567,47 @@ async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                            disable_web_page_preview=True)
 
 
+# ================= Google 搜索 /G =================
+SEARXNG_URL = "http://localhost:8889/search"
+
+async def google_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Google 搜索：/G <關鍵詞>"""
+    query = " ".join(context.args).strip()
+    if not query and update.message.reply_to_message:
+        query = (update.message.reply_to_message.text or "").strip()
+    if not query:
+        await update.message.reply_text(
+            "用法：/G <關鍵詞>\n例：/G Python 非同步教學\n或回覆訊息 + /G 自動搜索該內容")
+        return
+
+    status = await update.message.reply_text(f"🔍 Google 搜尋「{query}」…")
+    try:
+        async with httpx.AsyncClient(timeout=20) as hc:
+            params = {"q": query, "format": "json", "engines": "google"}
+            r = await hc.get(SEARXNG_URL, params=params)
+            r.raise_for_status()
+            data = r.json()
+    except Exception as e:
+        log.exception("google search failed")
+        await status.edit_text(f"❌ 搜索失敗：{str(e)[:200]}")
+        return
+
+    results = data.get("results", [])
+    if not results:
+        await status.edit_text(f"😿 搵唔到「{query}」相關結果")
+        return
+
+    lines = [f"🔎 「{query}」前 {min(len(results), 8)} 個結果：\n"]
+    for i, item in enumerate(results[:8], 1):
+        title = item.get("title", "無標題")
+        url = item.get("url", "")
+        snippet = (item.get("content") or "")[:120]
+        lines.append(f"{i}. [{title}]({url})\n   {snippet}…")
+
+    text = "\n".join(lines) + "\n\n💡 結果來自 SearXNG (Google CSE 引擎)"
+    await status.edit_text(text, parse_mode="Markdown", disable_web_page_preview=True)
+
+
 async def song_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyword = " ".join(context.args).strip()
     reply = update.message.reply_to_message
@@ -884,6 +927,8 @@ def main():
     app.add_handler(CommandHandler("ans", ans_command))
     app.add_handler(CommandHandler("sing", song_command))
     app.add_handler(CommandHandler("find", find_command))
+    app.add_handler(CommandHandler("g", google_search_command))
+    app.add_handler(CommandHandler("G", google_search_command))
     app.add_handler(CallbackQueryHandler(song_callback, pattern="^song:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, auto_msg_handler))
     app.add_handler(MessageHandler(filters.Sticker.ALL & ~filters.FORWARDED, sticker_msg_handler))
