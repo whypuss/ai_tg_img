@@ -586,7 +586,7 @@ async def google_search_command(update: Update, context: ContextTypes.DEFAULT_TY
     try:
         async with httpx.AsyncClient(timeout=20) as hc:
             # 不指定 engines，讓 SearXNG 自動用可用的（避免 google/bing 被 CAPTCHA 擋）
-            params = {"q": query, "format": "json", "categories": "general"}
+            params = {"q": query, "format": "json", "categories": "general", "safesearch": 0}
             r = await hc.get(SEARXNG_URL, params=params)
             r.raise_for_status()
             data = r.json()
@@ -637,7 +637,7 @@ async def image_search_command(update: Update, context: ContextTypes.DEFAULT_TYP
     status = await update.message.reply_text(f"🖼️ 搜尋圖片「{query}」…")
     try:
         async with httpx.AsyncClient(timeout=20) as hc:
-            params = {"q": query, "format": "json", "categories": "images"}
+            params = {"q": query, "format": "json", "categories": "images", "safesearch": 0}
             r = await hc.get(SEARXNG_URL, params=params)
             r.raise_for_status()
             data = r.json()
@@ -744,7 +744,7 @@ async def video_search_command(update: Update, context: ContextTypes.DEFAULT_TYP
     status = await update.message.reply_text(f"🎬 搜尋影片「{query}」…")
     try:
         async with httpx.AsyncClient(timeout=20) as hc:
-            params = {"q": query, "format": "json", "categories": "videos"}
+            params = {"q": query, "format": "json", "categories": "videos", "safesearch": 0}
             r = await hc.get(SEARXNG_URL, params=params)
             r.raise_for_status()
             data = r.json()
