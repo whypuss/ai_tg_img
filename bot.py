@@ -684,17 +684,24 @@ async def redraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Hi！用 /draw <描述> 生圖 🎨\n"
-                                    "圖生圖：回覆一張圖 + /redraw <想點改>\n"
-                                    "總結聊天記錄：/sum [條數，預設200]\n"
-                                    "問答：/ans <問題>\n"
-                                    "搜歌（播放+下載）：/sing <歌名或歌手>\n"
-                                    "Google 搜索：/G <關鍵詞>\n"
-                                    "搜圖片：/P <關鍵詞>\n"
-                                    "搜影片（播放）：/V <關鍵詞>\n"
-                                    "搜 JAV：/M <番號/關鍵詞>\n"
-                                    "搜 Telegram 群組：/find <關鍵字>\n"
-                                    "朗讀：/say（普通話）/sayc（粵語）<文字>")
+    text = ("Hi！用 /draw <描述> 生圖 🎨\n"
+            "圖生圖：回覆一張圖 + /redraw <想點改>\n"
+            "總結聊天記錄：/sum [條數，預設200]\n"
+            "問答：/ans <問題>\n"
+            "搜歌（播放+下載）：/sing <歌名或歌手>\n"
+            "Google 搜索：/G <關鍵詞>\n"
+            "搜圖片：/P <關鍵詞>\n"
+            "搜影片（播放）：/V <關鍵詞>\n"
+            "搜 JAV：/M <番號/關鍵詞>\n"
+            "搜 Telegram 群組：/find <關鍵字>\n"
+            "朗讀：/say（普通話）/sayc（粵語）<文字>")
+    # 擁有者私聊：底部加面板按鈕
+    if is_owner(update):
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("🎛️ 管理面板", callback_data="admin:home")]])
+        await update.message.reply_text(text, reply_markup=kb)
+    else:
+        await update.message.reply_text(text)
 
 
 CHAT_HISTORY_MAX = 500
@@ -1742,6 +1749,41 @@ async def chatter_bootstrap(update: Update, context: ContextTypes.DEFAULT_TYPE):
     asyncio.create_task(chatter_loop(context))
 
 
+async def _set_bot_commands(app):
+    """啟動時向 Telegram 註冊指令選單（底部 / 按鈕彈出）"""
+    from telegram import BotCommand, BotCommandScopeDefault, BotCommandScopeChat
+
+    # 所有人可見的指令
+    public_cmds = [
+        BotCommand("start", "📖 使用說明"),
+        BotCommand("draw", "🎨 AI 生圖"),
+        BotCommand("redraw", "🖌️ 圖生圖（回覆圖片）"),
+        BotCommand("sum", "📝 總結聊天記錄"),
+        BotCommand("ans", "💬 問問題"),
+        BotCommand("sing", "🎵 搜歌"),
+        BotCommand("find", "🔍 搜 TG 群組"),
+        BotCommand("G", "🔎 Google 搜索"),
+        BotCommand("P", "🖼️ 搜圖片"),
+        BotCommand("V", "🎬 搜影片"),
+        BotCommand("M", "🔞 搜 JAV"),
+        BotCommand("say", "🔊 朗讀（普通話）"),
+        BotCommand("sayc", "🔊 朗讀（粵語）"),
+    ]
+    # 擁有者私聊專屬指令
+    owner_cmds = public_cmds + [
+        BotCommand("panel", "🎛️ 管理面板"),
+    ]
+    try:
+        await app.bot.set_my_commands(public_cmds, scope=BotCommandScopeDefault())
+        if OWNER_ID:
+            await app.bot.set_my_commands(
+                owner_cmds, scope=BotCommandScopeChat(chat_id=OWNER_ID))
+        log.info("Bot commands registered (%d public, %d owner)",
+                 len(public_cmds), len(owner_cmds))
+    except Exception as e:
+        log.warning("set_my_commands failed: %s", e)
+
+
 def main():
     # concurrent_updates: 預設 PTB 係順序處理更新（一個 handler 跑完先到下一個），
     # AI 唸嘢時（/draw /sum /ans…）會令 /sing /say /貼圖回復全部排隊延遲。
@@ -1753,6 +1795,7 @@ def main():
            .read_timeout(60).write_timeout(120)
            .media_write_timeout(300)
            .connect_timeout(15).pool_timeout(30)
+           .post_init(_set_bot_commands)
            .build())
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("panel", panel_command))
