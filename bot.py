@@ -9,6 +9,7 @@ import os
 import random
 import re
 from datetime import datetime, timedelta
+from functools import wraps
 from urllib.parse import urlparse, quote_plus
 
 import httpx
@@ -84,6 +85,492 @@ logging.basicConfig(level=logging.INFO,
 log = logging.getLogger("drawbot")
 
 client = AsyncOpenAI(api_key=SENSENOVA_API_KEY, base_url=SENSENOVA_BASE_URL)
+
+# ================= 管理面板：白名單 & 群組註冊表 =================
+# 起步先用：Bot 擁有者 user ID（@userinfobot 查自己），冇設就所有人唔受限制
+OWNER_ID = int(os.environ.get("OWNER_ID", "0"))
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+WHITELIST_FILE = os.path.join(BASE_DIR, "whitelist.json")
+GROUPS_REGISTRY_FILE = os.path.join(BASE_DIR, "groups_registry.json")
+PAGE_SIZE = 6  # 面板每頁顯示群組數
+
+
+def _load_json(path: str) -> dict:
+    try:
+        with open(path, "r") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_json(path: str, data: dict):
+    with open(path, "w") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def load_whitelist() -> dict:
+    data = _load_json(WHITELIST_FILE)
+    data.setdefault("enabled", False)          # 總開關：False = 全開放（向後兼容）
+    data.setdefault("chats", [])               # 已授權群組 list[int]
+    data.setdefault("users", [])               # 已授權用戶 list[int]
+    data.setdefault("chats_info", {})          # str(chat_id) -> {note, added_at}
+    data.setdefault("users_info", {})
+    return data
+
+
+def save_whitelist(data: dict):
+    _save_json(WHITELIST_FILE, data)
+
+
+def load_groups_registry() -> dict:
+    return _load_json(GROUPS_REGISTRY_FILE)
+
+
+def save_groups_registry(data: dict):
+    _save_json(GROUPS_REGISTRY_FILE, data)
+
+
+def is_owner(update: Update) -> bool:
+    """面板/管理指令只允許 OWNER_ID。未設定 OWNER_ID 時面板完全禁用（安全預設）。"""
+    user = update.effective_user
+    if not user or not OWNER_ID:
+        return False
+    return user.id == OWNER_ID
+
+
+def is_authorized(update: Update) -> bool:
+    """總開關關閉 = 全開放。開啟後：chat 或 user 任一在白名單即放行。"""
+    wl = load_whitelist()
+    if not wl.get("enabled"):
+        return True
+    if is_owner(update):
+        return True
+    chat_id = update.effective_chat.id if update.effective_chat else 0
+    user_id = update.effective_user.id if update.effective_user else 0
+    return chat_id in wl["chats"] or user_id in wl["users"]
+
+
+async def register_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """記錄任何群組/頻道活動到註冊表（含標題、類型、成員數、活躍時間）"""
+    chat = update.effective_chat
+    if not chat or chat.id > 0:
+        return
+    cid = str(chat.id)
+    data = load_groups_registry()
+    wl = load_whitelist()
+    try:
+        member_count = await context.bot.get_chat_member_count(chat.id)
+    except Exception:
+        member_count = data.get(cid, {}).get("member_count", 0)
+    prev = data.get(cid, {})
+    data[cid] = {
+        "title": chat.title or prev.get("title", "Unknown"),
+        "type": chat.type,
+        "member_count": member_count,
+        "username": chat.username or prev.get("username"),
+        "first_seen": prev.get("first_seen", int(datetime.now().timestamp())),
+        "last_active": int(datetime.now().timestamp()),
+    }
+    save_groups_registry(data)
+
+
+def require_auth(handler):
+    """裝飾器：唔授權就攔截（群組視訊會話保留 start 可用）"""
+    @wraps(handler)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not is_authorized(update):
+            try:
+                await update.message.reply_text("🔒 此群組/用戶未授權使用本 Bot")
+            except Exception:
+                pass
+            log.warning("Unauthorized access: chat=%s user=%s",
+                        update.effective_chat.id if update.effective_chat else "?",
+                        update.effective_user.id if update.effective_user else "?")
+            return
+        return await handler(update, context)
+    return wrapper
+
+
+# ================= 管理面板 UI =================
+def _wl_btn(chat_id) -> str:
+    """白名單按鈕文字：當前狀態 + 切換動作"""
+    wl = load_whitelist()
+    if chat_id in wl["chats"]:
+        return "⬇️ 移出白名單"
+    return "⬆️ 加入白名單"
+
+
+async def _panel_edit(q, context, text, kb):
+    """編輯面板訊息；訊息被刪就重發"""
+    try:
+        await q.edit_message_text(text, reply_markup=kb,
+                                  parse_mode="Markdown", disable_web_page_preview=True)
+    except Exception:
+        await q.message.reply_text(text, reply_markup=kb,
+                                   parse_mode="Markdown", disable_web_page_preview=True)
+
+
+async def panel_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """主面板：狀態總覽 + 導航"""
+    q = update.callback_query
+    await q.answer()
+    if not is_owner(update):
+        await q.answer("❌ 無權限", show_alert=True)
+        return
+    wl = load_whitelist()
+    reg = load_groups_registry()
+
+    status = "🟢 開放（無限制）" if not wl["enabled"] else "🔴 白名單模式"
+    kb = [[InlineKeyboardButton("📋 已授權群組", callback_data="admin:chats:0")],
+          [InlineKeyboardButton("🌐 群組活動記錄", callback_data="admin:reg:0")],
+          [InlineKeyboardButton("👤 已授權用戶", callback_data="admin:users:0")],
+          [InlineKeyboardButton(("⛔ 開啟白名單" if not wl["enabled"]
+                                 else "✅ 關閉白名單"), callback_data="admin:toggle")]]
+    text = (f"🎛️ Bot 管理面板\n\n"
+            f"狀態：{status}\n"
+            f"授權群組：{len(wl['chats'])} 個\n"
+            f"授權用戶：{len(wl['users'])} 個\n"
+            f"活動群組：{len(reg)} 個\n\n"
+            f"OWNER_ID：{'已設定' if OWNER_ID else '未設定（私聊可管）'}")
+    await _panel_edit(q, context, text, InlineKeyboardMarkup(kb))
+
+
+async def panel_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """切換白名單總開關"""
+    q = update.callback_query
+    if not is_owner(update):
+        await q.answer("❌ 無權限", show_alert=True)
+        return
+    wl = load_whitelist()
+    wl["enabled"] = not wl["enabled"]
+    save_whitelist(wl)
+    await q.answer(
+        "✅ 白名單已開啟 — 之後只有授權才能用"
+        if wl["enabled"] else
+        "⭕ 白名單已關閉 — 所有人可用",
+        show_alert=True)
+    await panel_home(update, context)
+
+
+async def panel_chats(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 0):
+    """授權群組列表（分頁）"""
+    q = update.callback_query
+    await q.answer()
+    wl = load_whitelist()
+    wl_chats = list(wl["chats"])  # [] 表示空
+    if page < 0:
+        page = 0
+    total = len(wl_chats)
+    start = page * PAGE_SIZE
+    chunk = wl_chats[start:start + PAGE_SIZE]
+
+    lines = [f"📋 已授權群組（{total} 個）\n"]
+    if not chunk:
+        lines.append("_（未授權任何群組）_")
+    for cid in chunk:
+        info = wl["chats_info"].get(str(cid), {})
+        note = f" — {info['note'][:20]}" if info.get("note") else ""
+        lines.append(f"`{cid}`{note}")
+
+    kb = [[InlineKeyboardButton(f"{c} ⬇️ 移除", callback_data=f"admin:unchat:{c}")
+           for c in chunk[:3]],
+          [InlineKeyboardButton(f"{c} ⬇️ 移除", callback_data=f"admin:unchat:{c}")
+           for c in chunk[3:]] if len(chunk) > 3 else []]
+    # 過濾空行
+    kb = [row for row in kb if row]
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️", callback_data=f"admin:chats:{page - 1}"))
+    if start + PAGE_SIZE < total:
+        nav.append(InlineKeyboardButton("➡️", callback_data=f"admin:chats:{page + 1}"))
+    if nav:
+        kb.append(nav)
+    kb.append([InlineKeyboardButton("🔙 主面板", callback_data="admin:home"),
+               InlineKeyboardButton("➕ 添加群組（用戶自加）", callback_data="admin:addchat:prompt")])
+    await _panel_edit(q, context, "\n".join(lines), InlineKeyboardMarkup(kb))
+
+
+async def panel_registry(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 0):
+    """群組活動記錄（分頁，含白名單狀態標記）"""
+    q = update.callback_query
+    await q.answer()
+    wl = load_whitelist()
+    reg = load_groups_registry()
+    items = sorted(reg.items(), key=lambda kv: -kv[1].get("last_active", 0))
+    if page < 0:
+        page = 0
+    total = len(items)
+    start = page * PAGE_SIZE
+    chunk = items[start:start + PAGE_SIZE]
+
+    lines = [f"🌐 群組活動記錄（{total} 個）\n"]
+    if not chunk:
+        lines.append("_（尚未有任何群組活動）_")
+    for cid, info in chunk:
+        cid_int = int(cid)
+        auth = "✅" if cid_int in wl["chats"] else "⬜"
+        title = (info.get("title") or "Unknown")[:25]
+        members = info.get("member_count", "?")
+        last = datetime.fromtimestamp(info.get("last_active", 0)).strftime("%m-%d %H:%M")
+        lines.append(f"{auth} `{cid_int}` {title} | 👥{members} | {last}")
+
+    kb = [[InlineKeyboardButton(
+        f"{'⬇️' if int(cid) in wl['chats'] else '⬆️'} {info.get('title', '')[:12]}",
+        callback_data=f"admin:regact:{cid}") for cid, info in chunk]]
+    # 一列最多 2 個，過多的換行
+    kb = [kb[0][i:i + 2] for i in range(0, len(kb[0]), 2)] if kb and kb[0] else []
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️", callback_data=f"admin:reg:{page - 1}"))
+    if start + PAGE_SIZE < total:
+        nav.append(InlineKeyboardButton("➡️", callback_data=f"admin:reg:{page + 1}"))
+    if nav:
+        kb.append(nav)
+    kb.append([InlineKeyboardButton("🔙 主面板", callback_data="admin:home")])
+    await _panel_edit(q, context, "\n".join(lines), InlineKeyboardMarkup(kb))
+
+
+async def panel_users(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 0):
+    """授權用戶列表"""
+    q = update.callback_query
+    await q.answer()
+    wl = load_whitelist()
+    wl_users = list(wl["users"])
+    if page < 0:
+        page = 0
+    total = len(wl_users)
+    start = page * PAGE_SIZE
+    chunk = wl_users[start:start + PAGE_SIZE]
+
+    lines = [f"👤 已授權用戶（{total} 個）\n"]
+    if not chunk:
+        lines.append("_（未授權任何用戶）_")
+    for uid in chunk:
+        info = wl["users_info"].get(str(uid), {})
+        note = f" — {info['note'][:20]}" if info.get("note") else ""
+        lines.append(f"`{uid}`{note}")
+
+    kb = [[InlineKeyboardButton(f"{u} ⬇️ 移除", callback_data=f"admin:unuser:{u}")
+           for u in chunk[:3]],
+          [InlineKeyboardButton(f"{u} ⬇️ 移除", callback_data=f"admin:unuser:{u}")
+           for u in chunk[3:]] if len(chunk) > 3 else []]
+    kb = [row for row in kb if row]
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️", callback_data=f"admin:users:{page - 1}"))
+    if start + PAGE_SIZE < total:
+        nav.append(InlineKeyboardButton("➡️", callback_data=f"admin:users:{page + 1}"))
+    if nav:
+        kb.append(nav)
+    kb.append([InlineKeyboardButton("🔙 主面板", callback_data="admin:home")])
+    await _panel_edit(q, context, "\n".join(lines), InlineKeyboardMarkup(kb))
+
+
+async def panel_reg_act(update: Update, context: ContextTypes.DEFAULT_TYPE, cid: str):
+    """單個群組操作：查看詳情 + 白名單切換"""
+    q = update.callback_query
+    await q.answer()
+    wl = load_whitelist()
+    reg = load_groups_registry()
+    info = reg.get(cid, {})
+    cid_int = int(cid)
+    in_wl = cid_int in wl["chats"]
+    wl_info = wl["chats_info"].get(cid, {})
+
+    lines = [f"🌐 群組詳情：{info.get('title', 'Unknown')}\n",
+             f"Chat ID：`{cid_int}`",
+             f"類型：{info.get('type', '?')}",
+             f"成員：{info.get('member_count', '?')}",
+             f"User/name：@{info.get('username', '—')}",
+             f"首次發現：{datetime.fromtimestamp(info.get('first_seen', 0)).strftime('%Y-%m-%d %H:%M')}",
+             f"最後活躍：{datetime.fromtimestamp(info.get('last_active', 0)).strftime('%Y-%m-%d %H:%M')}",
+             f"白名單：{'✅ 已授權' if in_wl else '❌ 未授權'}",
+             f"備註：{wl_info.get('note', '—')}"]
+    kb = [[InlineKeyboardButton("⬇️ 移出白名單" if in_wl else "⬆️ 加入白名單",
+                                callback_data=f"admin:regtoggle:{cid}")],
+          [InlineKeyboardButton("🔙 活動記錄", callback_data="admin:reg:0"),
+           InlineKeyboardButton("🔙 主面板", callback_data="admin:home")]]
+    await _panel_edit(q, context, "\n".join(lines), InlineKeyboardMarkup(kb))
+
+
+async def panel_reg_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE, cid: str):
+    """從群組詳情切換白名單狀態"""
+    q = update.callback_query
+    wl = load_whitelist()
+    cid_int = int(cid)
+    if cid_int in wl["chats"]:
+        wl["chats"].remove(cid_int)
+        note = wl["chats_info"].pop(cid, None)
+        if note:
+            log.info("removed whitelist chat %s note=%s", cid, note.get("note"))
+    else:
+        wl["chats"].append(cid_int)
+        reg = load_groups_registry()
+        info = reg.get(cid, {})
+        wl["chats_info"][cid] = {
+            "note": f"from panel {info.get('title', '')[:20]}",
+            "added_at": int(datetime.now().timestamp()),
+        }
+    save_whitelist(wl)
+    await q.answer("已更新 ✅", show_alert=False)
+    await panel_reg_act(update, context, cid)
+
+
+async def panel_unchat(update: Update, context: ContextTypes.DEFAULT_TYPE, cid: str):
+    """從白名單移除群組"""
+    q = update.callback_query
+    wl = load_whitelist()
+    cid_int = int(cid)
+    if cid_int in wl["chats"]:
+        wl["chats"].remove(cid_int)
+        wl["chats_info"].pop(cid, None)
+        save_whitelist(wl)
+    await q.answer("已移除 ❌", show_alert=False)
+    await panel_chats(update, context, 0)
+
+
+async def panel_unuser(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: str):
+    """從白名單移除用戶"""
+    q = update.callback_query
+    wl = load_whitelist()
+    uid_int = int(uid)
+    if uid_int in wl["users"]:
+        wl["users"].remove(uid_int)
+        wl["users_info"].pop(uid, None)
+        save_whitelist(wl)
+    await q.answer("已移除 ❌", show_alert=False)
+    await panel_users(update, context, 0)
+
+
+async def panel_addchat_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """提示用戶輸入 chat_id（或轉發一個群組訊息）"""
+    q = update.callback_query
+    await q.answer()
+    # 儲存等待狀態，讓下一個文字訊息被捕獲
+    context.user_data["admin_waiting"] = "addchat"
+    kb = [[InlineKeyboardButton("🔙 主面板", callback_data="admin:home")]]
+    await _panel_edit(
+        q, context,
+        "✏️ 請輸入要授權的群組 **Chat ID**（負數，例如 `-1001234567890`）\n"
+        "💡 或者：把群組裡的一條訊息**轉發**到這個私聊，我會自動讀出該群組 ID，\n"
+        "又或者：直接傳一條群組訊息連結（t.me/groupname/123）",
+        InlineKeyboardMarkup(kb))
+
+
+async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """當面板等待輸入時，捕獲用戶發送的文字/轉發，解析 chat_id 並加白名單"""
+    if not context.user_data.get("admin_waiting"):
+        return
+    if not is_owner(update):
+        return
+    mode = context.user_data.pop("admin_waiting", None)
+    msg = update.message
+
+    cid = None
+    if msg.forward_from_chat:  # 轉發群組訊息
+        cid = msg.forward_from_chat.id
+        title = msg.forward_from_chat.title or ""
+    elif msg.text:
+        txt = msg.text.strip()
+        m = re.search(r"-?\d{5,}", txt)   # 任意負/正長數字
+        if m:
+            cid = int(m.group(0))
+        else:
+            m2 = re.search(r"t\.me/([A-Za-z0-9_]{5,})/(\d+)", txt)
+            if m2:
+                chat_username, msg_id = m2.group(1), int(m2.group(2))
+                try:
+                    chat = await context.bot.get_chat("@" + chat_username)
+                    cid = chat.id
+                    title = chat.title or chat_username
+                except Exception:
+                    await msg.reply_text("❌ 無法解析該群組連結")
+                    return
+
+    if cid is None:
+        await msg.reply_text("❌ 無法解析群組 ID，請用 /panel 再試，或直接發送數字的 chat_id")
+        return
+
+    if cid >= 0:
+        await msg.reply_text(
+            "❌ Chat ID 必須係負數（群組），例如 `-1001234567890`。\n"
+            "用戶 ID 授權請用 /panel → 👤 已授權用戶",
+            parse_mode="Markdown")
+        return
+
+    wl = load_whitelist()
+    if cid not in wl["chats"]:
+        wl["chats"].append(cid)
+        wl["chats_info"][str(cid)] = {
+            "note": title if locals().get("title") else f"manual {datetime.now().strftime('%m-%d')}",
+            "added_at": int(datetime.now().timestamp()),
+        }
+        save_whitelist(wl)
+    await msg.reply_text(f"✅ 已授權：`{cid}`", parse_mode="Markdown")
+
+
+async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """面板回撥路由：admin:<action>:<value>"""
+    q = update.callback_query
+    if not q or not q.data or not q.data.startswith("admin:"):
+        return
+    if not is_owner(update):
+        await q.answer("❌ 無權限", show_alert=True)
+        return
+    try:
+        parts = q.data.split(":")
+        action = parts[1] if len(parts) > 1 else "home"
+        value = parts[2] if len(parts) > 2 else ""
+        if action == "home":
+            await panel_home(update, context)
+        elif action == "toggle":
+            await panel_toggle(update, context)
+        elif action == "chats":
+            await panel_chats(update, context, int(value or 0))
+        elif action == "reg":
+            await panel_registry(update, context, int(value or 0))
+        elif action == "users":
+            await panel_users(update, context, int(value or 0))
+        elif action == "regact":
+            await panel_reg_act(update, context, value)
+        elif action == "regtoggle":
+            await panel_reg_toggle(update, context, value)
+        elif action == "unchat":
+            await panel_unchat(update, context, value)
+        elif action == "unuser":
+            await panel_unuser(update, context, value)
+        elif action == "addchat":
+            await panel_addchat_prompt(update, context)
+        else:
+            await panel_home(update, context)
+    except Exception as e:
+        log.exception("admin callback error: %s", q.data)
+        try:
+            await q.answer(f"❌ 出錯：{str(e)[:60]}", show_alert=True)
+        except Exception:
+            pass
+
+
+async def panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/panel — 開啟管理面板"""
+    if not is_owner(update):
+        await update.message.reply_text("🔒 無權限使用管理面板")
+        return
+    wl = load_whitelist()
+    reg = load_groups_registry()
+    status = "🟢 開放" if not wl["enabled"] else "🔴 白名單模式"
+    kb = [[InlineKeyboardButton("📋 已授權群組", callback_data="admin:chats:0")],
+          [InlineKeyboardButton("🌐 群組活動記錄", callback_data="admin:reg:0")],
+          [InlineKeyboardButton("👤 已授權用戶", callback_data="admin:users:0")],
+          [InlineKeyboardButton(("⛔ 開啟白名單" if not wl["enabled"]
+                                 else "✅ 關閉白名單"), callback_data="admin:toggle")]]
+    text = (f"🎛️ Bot 管理面板\n\n"
+            f"狀態：{status}\n"
+            f"授權群組：{len(wl['chats'])} 個\n"
+            f"授權用戶：{len(wl['users'])} 個\n"
+            f"活動群組：{len(reg)} 個")
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb))
 
 
 async def download_image(item):
@@ -1116,6 +1603,14 @@ async def auto_msg_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not msg or not msg.text:
         return
 
+    # 面板等待輸入模式：捕獲 chat_id / 轉發 / 連結
+    if context.user_data.get("admin_waiting"):
+        await handle_admin_input(update, context)
+        return
+
+    # 記錄群組到註冊表（靠 msg 作最大努力）
+    await register_group(update, context)
+
     # 記錄聊天
     name = msg.from_user.full_name if msg.from_user else "?"
     h = chat_hist(context, msg.chat_id)
@@ -1127,6 +1622,11 @@ async def auto_msg_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 只在群組自動回覆
     if msg.chat_id > 0:
+        return
+
+    # 白名單模式：非授權群組唔自動回覆
+    if not is_authorized(update):
+        log.info("skip auto-answer in unauthorized chat=%s", msg.chat_id)
         return
 
     text = msg.text.strip()
@@ -1255,24 +1755,26 @@ def main():
            .connect_timeout(15).pool_timeout(30)
            .build())
     app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("draw", draw_command))
-    app.add_handler(CommandHandler("redraw", redraw_command))
-    app.add_handler(CommandHandler("sum", sum_command))
-    app.add_handler(CommandHandler("say", say_command))
-    app.add_handler(CommandHandler("sayc", sayc_command))
-    app.add_handler(CommandHandler("ans", ans_command))
-    app.add_handler(CommandHandler("sing", song_command))
-    app.add_handler(CommandHandler("find", find_command))
-    app.add_handler(CommandHandler("g", google_search_command))
-    app.add_handler(CommandHandler("G", google_search_command))
-    app.add_handler(CommandHandler("p", image_search_command))
-    app.add_handler(CommandHandler("P", image_search_command))
-    app.add_handler(CommandHandler("v", video_search_command))
-    app.add_handler(CommandHandler("V", video_search_command))
-    app.add_handler(CommandHandler("m", jav_search_command))
-    app.add_handler(CommandHandler("M", jav_search_command))
+    app.add_handler(CommandHandler("panel", panel_command))
+    app.add_handler(CommandHandler("draw", require_auth(draw_command)))
+    app.add_handler(CommandHandler("redraw", require_auth(redraw_command)))
+    app.add_handler(CommandHandler("sum", require_auth(sum_command)))
+    app.add_handler(CommandHandler("say", require_auth(say_command)))
+    app.add_handler(CommandHandler("sayc", require_auth(sayc_command)))
+    app.add_handler(CommandHandler("ans", require_auth(ans_command)))
+    app.add_handler(CommandHandler("sing", require_auth(song_command)))
+    app.add_handler(CommandHandler("find", require_auth(find_command)))
+    app.add_handler(CommandHandler("g", require_auth(google_search_command)))
+    app.add_handler(CommandHandler("G", require_auth(google_search_command)))
+    app.add_handler(CommandHandler("p", require_auth(image_search_command)))
+    app.add_handler(CommandHandler("P", require_auth(image_search_command)))
+    app.add_handler(CommandHandler("v", require_auth(video_search_command)))
+    app.add_handler(CommandHandler("V", require_auth(video_search_command)))
+    app.add_handler(CommandHandler("m", require_auth(jav_search_command)))
+    app.add_handler(CommandHandler("M", require_auth(jav_search_command)))
     app.add_handler(CallbackQueryHandler(song_callback, pattern="^song:"))
     app.add_handler(CallbackQueryHandler(video_callback, pattern="^vid:"))
+    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, auto_msg_handler))
     app.add_handler(MessageHandler(filters.Sticker.ALL & ~filters.FORWARDED, sticker_msg_handler))
     app.add_handler(MessageHandler(filters.ALL, chatter_bootstrap))
