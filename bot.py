@@ -964,15 +964,15 @@ async def _fetch_javdb(query: str) -> list:
     # 解析 HTML，提取影片資訊
     results = []
     import re
-    # 匹配影片卡片
-    pattern = r'<a class="box" href="/v/([^"]+)".*?<img[^>]+src="([^"]+)".*?<strong class="title">([^<]+)</strong>.*?<span class="video-code">([^<]+)</span>'
+    # 匹配影片卡片：class="box" href="/v/xxx" title="..."
+    pattern = r'<a class="box" href="/v/([^"]+)"[^>]*title="([^"]*)"[^>]*>.*?<img[^>]+src="([^"]+)".*?<div class="video-title"><strong>([^<]+)</strong>([^<]*)</div>'
     matches = re.findall(pattern, html, re.DOTALL)
-    for vid, img, title, code in matches[:8]:
-        # 清理標題
-        title = re.sub(r'<[^>]+>', '', title).strip()
+    for vid, title, img, code, subtitle in matches[:8]:
+        # 組合標題
+        full_title = f"{code.strip()} {title.strip()}"
         results.append({
             "id": vid,
-            "title": title,
+            "title": title.strip(),
             "code": code.strip(),
             "url": f"https://javdb.com/v/{vid}",
             "cover": img,
