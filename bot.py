@@ -583,8 +583,8 @@ async def google_search_command(update: Update, context: ContextTypes.DEFAULT_TY
     status = await update.message.reply_text(f"🔍 Google 搜尋「{query}」…")
     try:
         async with httpx.AsyncClient(timeout=20) as hc:
-            # SearXNG 引擎名稱是 "google cse" 不是 "google"
-            params = {"q": query, "format": "json", "engines": "google cse"}
+            # SearXNG 引擎名稱是 "google" 不是 "google cse"（後者已 rate limited）
+            params = {"q": query, "format": "json", "engines": "google"}
             r = await hc.get(SEARXNG_URL, params=params)
             r.raise_for_status()
             data = r.json()
@@ -598,14 +598,14 @@ async def google_search_command(update: Update, context: ContextTypes.DEFAULT_TY
         await status.edit_text(f"😿 搵唔到「{query}」相關結果")
         return
 
-    lines = [f"🔎 「{query}」前 {min(len(results), 8)} 個結果：\n"]
-    for i, item in enumerate(results[:8], 1):
+    lines = [f"🔎 「{query}」前 {min(len(results), 5)} 個結果：\n"]
+    for i, item in enumerate(results[:5], 1):
         title = item.get("title", "無標題")
         url = item.get("url", "")
         snippet = (item.get("content") or "")[:120]
         lines.append(f"{i}. [{title}]({url})\n   {snippet}…")
 
-    text = "\n".join(lines) + "\n\n💡 結果來自 SearXNG (Google CSE 引擎)"
+    text = "\n".join(lines) + "\n\n💡 結果來自 SearXNG (Google 引擎)"
     await status.edit_text(text, parse_mode="Markdown", disable_web_page_preview=True)
 
 
