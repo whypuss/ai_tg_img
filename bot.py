@@ -205,6 +205,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                     "Google 搜索：/G <關鍵詞>\n"
                                     "搜圖片：/P <關鍵詞>\n"
                                     "搜影片（播放）：/V <關鍵詞>\n"
+                                    "搜 JAV：/M <番號/關鍵詞>\n"
                                     "搜 Telegram 群組：/find <關鍵字>\n"
                                     "朗讀：/say（普通話）/sayc（粵語）<文字>")
 
@@ -944,6 +945,97 @@ async def song_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
 
+# ================= JAV 搜索 /M =================
+JAV_SEARCH_URL = "https://javdb.com/search"
+
+async def _fetch_javdb(query: str) -> list:
+    """搜索 JAVDB，返回前 8 個結果"""
+    try:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as hc:
+            params = {"q": query}
+            headers = {"User-Agent": "Mozilla/5.0 (compatible; TelegramBot/1.0)"}
+            r = await hc.get(JAV_SEARCH_URL, params=params, headers=headers)
+            r.raise_for_status()
+            html = r.text
+    except Exception as e:
+        log.warning("javdb search failed: %s", e)
+        return []
+
+    # 解析 HTML，提取影片資訊
+    results = []
+    import re
+    # 匹配影片卡片
+    pattern = r'<a class="box" href="/v/([^"]+)".*?<img[^>]+src="([^"]+)".*?<strong class="title">([^<]+)</strong>.*?<span class="video-code">([^<]+)</span>'
+    matches = re.findall(pattern, html, re.DOTALL)
+    for vid, img, title, code in matches[:8]:
+        # 清理標題
+        title = re.sub(r'<[^>]+>', '', title).strip()
+        results.append({
+            "id": vid,
+            "title": title,
+            "code": code.strip(),
+            "url": f"https://javdb.com/v/{vid}",
+            "cover": img,
+        })
+    return results
+
+
+async def jav_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """JAV 搜索：/M <番號/關鍵詞> → JAVDB 搜索 → 顯示封面圖 + 鏈接"""
+    query = " ".join(context.args).strip()
+    if not query and update.message.reply_to_message:
+        query = (update.message.reply_to_message.text or "").strip()
+    if not query:
+        await update.message.reply_text(
+            "用法：/M <番號或關鍵詞>\n例：/M SSIS-001\n例：/M 葵つかさ")
+        return
+
+    status = await update.message.reply_text(f"🔍 JAVDB 搜尋「{query}」…")
+    results = await _fetch_javdb(query)
+    if not results:
+        await status.edit_text(f"😿 搵唔到「{query}」相關影片")
+        return
+
+    context.user_data["jav_results"] = results
+
+    # 下載封面圖並行
+    await status.edit_text(f"⬇️ 下載緊 {len(results)} 張封面…")
+    download_tasks = [_download_img(r["cover"]) for r in results]
+    downloaded = await asyncio.gather(*download_tasks)
+
+    # 準備 media group
+    from telegram import InputMediaPhoto
+    media = []
+    for i, (raw, item) in enumerate(zip(downloaded, results)):
+        if raw and len(raw) > 1000:
+            buf = io.BytesIO(raw)
+            buf.seek(0)
+            buf.name = "cover.jpg"
+            caption = f"{item['code']} - {item['title'][:80]}\n🔗 {item['url']}"
+            media.append(InputMediaPhoto(media=buf, caption=caption))
+        if len(media) >= 8:
+            break
+
+    if not media:
+        await status.edit_text("❌ 封面圖下載失敗")
+        return
+
+    # 發送相簿
+    try:
+        await context.bot.send_media_group(chat_id=update.message.chat_id, media=media)
+        await status.delete()
+    except Exception as e:
+        log.exception("jav send_media_group failed")
+        # fallback: 逐張發 + 文字
+        for buf, item in zip([m.media for m in media], results):
+            buf.seek(0)
+            try:
+                await update.message.reply_photo(photo=buf, caption=f"{item['code']} - {item['title'][:80]}\n🔗 {item['url']}")
+            except Exception:
+                pass
+        await status.delete()
+
+
 # ================= 自動問答 & 深夜胡說 =================
 # 關鍵字觸發：中文/英文問號 + 常見粵語/普通話疑問詞/語氣詞
 QUESTION_PATTERN = re.compile(
@@ -1176,6 +1268,8 @@ def main():
     app.add_handler(CommandHandler("P", image_search_command))
     app.add_handler(CommandHandler("v", video_search_command))
     app.add_handler(CommandHandler("V", video_search_command))
+    app.add_handler(CommandHandler("m", jav_search_command))
+    app.add_handler(CommandHandler("M", jav_search_command))
     app.add_handler(CallbackQueryHandler(song_callback, pattern="^song:"))
     app.add_handler(CallbackQueryHandler(video_callback, pattern="^vid:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, auto_msg_handler))
