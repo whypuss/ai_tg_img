@@ -583,7 +583,8 @@ async def google_search_command(update: Update, context: ContextTypes.DEFAULT_TY
     status = await update.message.reply_text(f"🔍 Google 搜尋「{query}」…")
     try:
         async with httpx.AsyncClient(timeout=20) as hc:
-            params = {"q": query, "format": "json", "engines": "google"}
+            # SearXNG 引擎名稱是 "google cse" 不是 "google"
+            params = {"q": query, "format": "json", "engines": "google cse"}
             r = await hc.get(SEARXNG_URL, params=params)
             r.raise_for_status()
             data = r.json()
