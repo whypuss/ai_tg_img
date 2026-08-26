@@ -571,7 +571,7 @@ async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 SEARXNG_URL = "http://localhost:8889/search"
 
 async def google_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Google 搜索：/G <關鍵詞>"""
+    """Google 搜索：/G <關鍵詞>（透過 SearXNG，自動用可用引擎）"""
     query = " ".join(context.args).strip()
     if not query and update.message.reply_to_message:
         query = (update.message.reply_to_message.text or "").strip()
@@ -580,11 +580,11 @@ async def google_search_command(update: Update, context: ContextTypes.DEFAULT_TY
             "用法：/G <關鍵詞>\n例：/G Python 非同步教學\n或回覆訊息 + /G 自動搜索該內容")
         return
 
-    status = await update.message.reply_text(f"🔍 Google 搜尋「{query}」…")
+    status = await update.message.reply_text(f"🔍 搜尋「{query}」…")
     try:
         async with httpx.AsyncClient(timeout=20) as hc:
-            # SearXNG 引擎名稱是 "google" 不是 "google cse"（後者已 rate limited）
-            params = {"q": query, "format": "json", "engines": "google"}
+            # 不指定 engines，讓 SearXNG 自動用可用的（避免 google/bing 被 CAPTCHA 擋）
+            params = {"q": query, "format": "json", "categories": "general"}
             r = await hc.get(SEARXNG_URL, params=params)
             r.raise_for_status()
             data = r.json()
@@ -603,9 +603,10 @@ async def google_search_command(update: Update, context: ContextTypes.DEFAULT_TY
         title = item.get("title", "無標題")
         url = item.get("url", "")
         snippet = (item.get("content") or "")[:120]
-        lines.append(f"{i}. [{title}]({url})\n   {snippet}…")
+        engines = item.get("engines", [])
+        lines.append(f"{i}. [{title}]({url})\n   {snippet}…\n   🔧 {', '.join(engines) if engines else '未知'}")
 
-    text = "\n".join(lines) + "\n\n💡 結果來自 SearXNG (Google 引擎)"
+    text = "\n".join(lines) + "\n\n💡 結果來自 SearXNG 可用引擎"
     await status.edit_text(text, parse_mode="Markdown", disable_web_page_preview=True)
 
 
