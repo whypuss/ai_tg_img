@@ -203,6 +203,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                     "問答：/ans <問題>\n"
                                     "搜歌（播放+下載）：/sing <歌名或歌手>\n"
                                     "Google 搜索：/G <關鍵詞>\n"
+                                    "搜圖片：/P <關鍵詞>\n"
                                     "搜影片（播放）：/V <關鍵詞>\n"
                                     "搜 Telegram 群組：/find <關鍵字>\n"
                                     "朗讀：/say（普通話）/sayc（粵語）<文字>")
@@ -609,6 +610,92 @@ async def google_search_command(update: Update, context: ContextTypes.DEFAULT_TY
 
     text = "\n".join(lines) + "\n\n💡 結果來自 SearXNG 可用引擎"
     await status.edit_text(text, parse_mode="Markdown", disable_web_page_preview=True)
+
+
+# ================= 圖片搜索 /P =================
+async def _download_img(url: str, timeout: int = 15) -> bytes | None:
+    """下載圖片，失敗返回 None"""
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as hc:
+            r = await hc.get(url)
+            r.raise_for_status()
+            return r.content
+    except Exception:
+        return None
+
+
+async def image_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """圖片搜索：/P <關鍵詞> → SearXNG 搜圖 → 下載 4 張 → Telegram 顯示"""
+    query = " ".join(context.args).strip()
+    if not query and update.message.reply_to_message:
+        query = (update.message.reply_to_message.text or "").strip()
+    if not query:
+        await update.message.reply_text(
+            "用法：/P <關鍵詞>\n例：/P 貓咪\n或回覆訊息 + /P 自動搜索該內容")
+        return
+
+    status = await update.message.reply_text(f"🖼️ 搜尋圖片「{query}」…")
+    try:
+        async with httpx.AsyncClient(timeout=20) as hc:
+            params = {"q": query, "format": "json", "categories": "images"}
+            r = await hc.get(SEARXNG_URL, params=params)
+            r.raise_for_status()
+            data = r.json()
+    except Exception as e:
+        log.exception("image search failed")
+        await status.edit_text(f"❌ 搜索失敗：{str(e)[:200]}")
+        return
+
+    results = data.get("results", [])
+    if not results:
+        await status.edit_text(f"😿 搵唔到「{query}」相關圖片")
+        return
+
+    # 取前 8 個有 img_src 的結果，並行下載，取最先成功的 4 張
+    candidates = [r for r in results if r.get("img_src")][:8]
+    if not candidates:
+        await status.edit_text(f"😿 搵唔到可顯示嘅圖片")
+        return
+
+    await status.edit_text(f"⬇️ 下載緊 {min(len(candidates), 4)} 張圖片…")
+
+    download_tasks = [_download_img(c["img_src"]) for c in candidates]
+    downloaded = await asyncio.gather(*download_tasks)
+
+    photos = []
+    for raw, item in zip(downloaded, candidates):
+        if raw and len(raw) > 1000:
+            buf = io.BytesIO(raw)
+            buf.seek(0)
+            buf.name = "image.jpg"
+            photos.append((buf, item.get("title", "")[:60]))
+        if len(photos) >= 4:
+            break
+
+    if not photos:
+        await status.edit_text("❌ 圖片下載失敗，可能被來源網站擋住")
+        return
+
+    # send_media_group 最多 10 張，用 InputMediaPhoto
+    from telegram import InputMediaPhoto
+    media = []
+    for buf, title in photos:
+        buf.seek(0)
+        media.append(InputMediaPhoto(media=buf, caption=title))
+
+    try:
+        await context.bot.send_media_group(chat_id=update.message.chat_id, media=media)
+        await status.delete()
+    except Exception as e:
+        log.exception("send_media_group failed")
+        # fallback: 逐張發
+        for buf, title in photos:
+            buf.seek(0)
+            try:
+                await update.message.reply_photo(photo=buf, caption=title)
+            except Exception:
+                pass
+        await status.delete()
 
 
 # ================= 視頻搜索 /V =================
@@ -1085,6 +1172,8 @@ def main():
     app.add_handler(CommandHandler("find", find_command))
     app.add_handler(CommandHandler("g", google_search_command))
     app.add_handler(CommandHandler("G", google_search_command))
+    app.add_handler(CommandHandler("p", image_search_command))
+    app.add_handler(CommandHandler("P", image_search_command))
     app.add_handler(CommandHandler("v", video_search_command))
     app.add_handler(CommandHandler("V", video_search_command))
     app.add_handler(CallbackQueryHandler(song_callback, pattern="^song:"))
