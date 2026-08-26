@@ -759,18 +759,18 @@ async def auto_msg_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _auto_answer(update, context, user_part or "hi", sticker_prob=0.2)
         return
 
-    # ② 問題關鍵字觸發（100% 回應：20% 貼圖 / 80% 文字）
-    if QUESTION_PATTERN.search(text):
+    # ② 問題關鍵字觸發（30% 回應：20% 貼圖 / 80% 文字）
+    if QUESTION_PATTERN.search(text) and random.random() < 0.3:
         await _auto_answer(update, context, text, sticker_prob=0.2)
         return
 
-    # ③ 路人隨機回覆（25% 機率會回；回時 70% 貼圖 / 30% 文字）
-    if random.random() < 0.25:
+    # ③ 路人隨機回覆（10% 機率會回；回時 70% 貼圖 / 30% 文字）
+    if random.random() < 0.1:
         await _auto_answer(update, context, text, sticker_prob=0.7)
 
 
 async def sticker_msg_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """有人發貼圖 → 15% 回貼圖 / 85% 回文字"""
+    """有人發貼圖 → 15% 回貼圖 / 20% 回文字 / 65% 唔理"""
     msg = update.message
     if not msg or not msg.sticker or msg.chat_id > 0:
         return
@@ -783,20 +783,22 @@ async def sticker_msg_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     if len(h) > CHAT_HISTORY_MAX:
         del h[: len(h) - CHAT_HISTORY_MAX]
     # 15% 回貼圖（唔用自己個 file_id，用對方發嘅，似真人互動）
-    if random.random() < 0.15:
+    r = random.random()
+    if r < 0.15:
         try:
             await context.bot.send_sticker(chat_id=msg.chat_id,
                                             sticker=msg.sticker.file_id)
         except Exception:
             log.exception("sticker reply failed")
-    else:
-        # 85% 回文字（走 _auto_answer，sticker_prob=0 保證唔再發貼圖）
+    elif r < 0.35:
+        # 20% 回文字（走 _auto_answer，sticker_prob=0 保證唔再發貼圖）
         await _auto_answer(update, context, "發貼圖", sticker_prob=0.0)
+    # else 65% 唔理
 
 
 async def chatter_loop(context: ContextTypes.DEFAULT_TYPE):
-    """背景：每日 11:00–02:00（跨日）每 45 分鐘喺群組講一句廢話"""
-    INTERVAL = 45 * 60
+    """背景：每日 11:00–02:00（跨日）每 60 分鐘喺群組講一句廢話（由 45min 改為 60min）"""
+    INTERVAL = 60 * 60
 
     def in_window() -> bool:
         # 用戶要求香港時間 11:00AM–02:00AM next day（UTC+8）
@@ -815,8 +817,8 @@ async def chatter_loop(context: ContextTypes.DEFAULT_TYPE):
         chat_id = random.choice(group_ids)
         if in_window():
             try:
-                # 機率分布：40% 貼圖 / 60% LLM 文字
-                if STICKER_FILE_IDS and random.random() < 0.4:
+                # 機率分布：20% 貼圖 / 80% LLM 文字（由 40% 貼圖改為 20%） 
+                if STICKER_FILE_IDS and random.random() < 0.2:
                     sticker_id = random.choice(STICKER_FILE_IDS)
                     await context.bot.send_sticker(chat_id=chat_id,
                                                     sticker=sticker_id)
