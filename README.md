@@ -14,6 +14,7 @@ Telegram 生圖 / 多功能 Bot — SenseNova (sensenova-u1-fast) + 多模型輪
 | `/g <關鍵詞>` | 🔍 網頁搜索：透過本地 SearXNG（自動選可用引擎，避開 CAPTCHA），返回前 5 條結果 |
 | `/p <關鍵詞>` | 🖼️ 圖片搜索：SearXNG 搜圖 → 並行下載 → send_media_group 顯示 4 張圖片 |
 | `/v <關鍵詞>` | 🎬 視頻搜索：SearXNG 搜片 → yt-dlp 提取 → 直接喺 Telegram 播放（≤45MB） |
+| `/m <番號/關鍵詞>` | 🔞 JAV 搜索：JAVDB 搜番號/女優 → 顯示封面圖 + 影片鏈接 |
 | `/find <關鍵字>` | 🔎 搜 Telegram 公開群組/頻道（本地 FTS5 + SearXNG 發現） |
 | `/say <文字>` | 🔊 普通話 TTS（Edge TTS zh-CN-XiaoxiaoNeural） |
 | `/sayc <文字>` | 🔊 粵語 TTS（Edge TTS zh-HK-HiuMaanNeural） |
