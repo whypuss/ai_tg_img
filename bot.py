@@ -203,6 +203,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                     "問答：/ans <問題>\n"
                                     "搜歌（播放+下載）：/sing <歌名或歌手>\n"
                                     "Google 搜索：/G <關鍵詞>\n"
+                                    "搜影片（播放）：/V <關鍵詞>\n"
                                     "搜 Telegram 群組：/find <關鍵字>\n"
                                     "朗讀：/say（普通話）/sayc（粵語）<文字>")
 
@@ -610,6 +611,159 @@ async def google_search_command(update: Update, context: ContextTypes.DEFAULT_TY
     await status.edit_text(text, parse_mode="Markdown", disable_web_page_preview=True)
 
 
+# ================= 視頻搜索 /V =================
+VIDEO_MAX_SIZE = 45 * 1024 * 1024  # Telegram bot 上傳上限 50MB，留餘量
+VIDEO_DOWNLOAD_SEM = asyncio.Semaphore(2)
+
+async def _extract_video(url: str) -> tuple:
+    """用 yt-dlp 提取視頻直接 URL + 標題。回傳 (url, title) 或 (None, None)"""
+    import yt_dlp
+    opts = {
+        "quiet": True, "no_warnings": True, "skip_download": True,
+        "format": "best[ext=mp4][filesize<50M]/best[filesize<50M]/best",
+        "noplaylist": True,
+    }
+    try:
+        loop = asyncio.get_event_loop()
+        def _extract():
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                return ydl.extract_info(url, download=False)
+        info = await loop.run_in_executor(None, _extract)
+        if not info:
+            return None, None
+        title = info.get("title", "")
+        # 嘗試拿直接 URL
+        if info.get("url"):
+            return info["url"], title
+        formats = info.get("formats", [])
+        if formats:
+            return formats[-1].get("url", ""), title
+        return None, title
+    except Exception as e:
+        log.warning("yt-dlp extract failed for %s: %s", url, e)
+        return None, None
+
+
+async def video_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """視頻搜索：/V <關鍵詞> → 搜片 → 下載 → Telegram 播放"""
+    query = " ".join(context.args).strip()
+    if not query and update.message.reply_to_message:
+        query = (update.message.reply_to_message.text or "").strip()
+    if not query:
+        await update.message.reply_text(
+            "用法：/V <關鍵詞>\n例：/V 貓咪搞笑\n或回覆訊息 + /V 自動搜索該內容")
+        return
+
+    status = await update.message.reply_text(f"🎬 搜尋影片「{query}」…")
+    try:
+        async with httpx.AsyncClient(timeout=20) as hc:
+            params = {"q": query, "format": "json", "categories": "videos"}
+            r = await hc.get(SEARXNG_URL, params=params)
+            r.raise_for_status()
+            data = r.json()
+    except Exception as e:
+        log.exception("video search failed")
+        await status.edit_text(f"❌ 搜索失敗：{str(e)[:200]}")
+        return
+
+    results = data.get("results", [])
+    if not results:
+        await status.edit_text(f"😿 搵唔到「{query}」相關影片")
+        return
+
+    # 只保留有可下載 URL 的結果（youtube/bilibili 等）
+    candidates = [r for r in results if r.get("url")]
+    if not candidates:
+        await status.edit_text(f"😿 搵唔到可播放嘅影片")
+        return
+
+    # 顯示搜索結果列表 + Inline 按鈕
+    top = candidates[:5]
+    context.user_data["video_results"] = top
+    lines = []
+    for i, item in enumerate(top, 1):
+        title = item.get("title", "無標題")[:60]
+        url = item.get("url", "")
+        # 標記來源
+        if "youtube" in url:
+            src = "▶️ YouTube"
+        elif "bilibili" in url or "b23.tv" in url:
+            src = "📺 B站"
+        else:
+            src = "🔗 其他"
+        lines.append(f"{i}. {title}\n   {src}")
+
+    kb = [[InlineKeyboardButton(f"{i} ▶️ 播放", callback_data=f"vid:p:{i-1}")]
+          for i in range(1, len(top) + 1)]
+    text = f"🎬 「{query}」搵到 {len(top)} 條影片：\n\n" + "\n".join(lines) + "\n\n揀一個嚟播👇"
+    await status.edit_text(text, reply_markup=InlineKeyboardMarkup(kb))
+
+
+async def video_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    try:
+        kind, idx_s = q.data.split(":")[1:]
+        idx = int(idx_s)
+    except (ValueError, IndexError):
+        await q.answer("❌ 連結失效，重新 /V", show_alert=True)
+        return
+    results = context.user_data.get("video_results") or []
+    if not (0 <= idx < len(results)):
+        await q.answer("❌ 結果已過期，重新 /V", show_alert=True)
+        return
+
+    video = results[idx]
+    url = video.get("url", "")
+    title = video.get("title", "影片")
+    chat_id = q.message.chat_id
+
+    status = await context.bot.send_message(chat_id, f"⏳ 正在提取「{title[:40]}」…")
+    try:
+        # 1. yt-dlp 提取直接 URL
+        direct_url, vtitle = await asyncio.wait_for(_extract_video(url), timeout=30)
+        if not direct_url:
+            await status.edit_text(f"❌ 提取失敗，可能不支援此影片來源\n🔗 {url}")
+            return
+
+        # 2. 下載影片
+        await status.edit_text(f"⬇️ 下載中「{vtitle[:40]}」…")
+        buf = io.BytesIO()
+        async with VIDEO_DOWNLOAD_SEM:
+            async with httpx.AsyncClient(timeout=120, follow_redirects=True) as hc:
+                async with hc.stream("GET", direct_url) as r:
+                    r.raise_for_status()
+                    async for chunk in r.aiter_bytes(64 * 1024):
+                        buf.write(chunk)
+                        if buf.tell() > VIDEO_MAX_SIZE:
+                            await status.edit_text(
+                                f"❌ 檔案太大（>{VIDEO_MAX_SIZE // 1024 // 1024}MB），Telegram 無法發送")
+                            return
+
+        if buf.tell() < 1000:
+            await status.edit_text("❌ 下載失敗，檔案為空")
+            return
+
+        # 3. 發送到 Telegram
+        await status.edit_text("📤 上傳中…")
+        buf.seek(0)
+        buf.name = "video.mp4"
+        fname = re.sub(r'[\\/:*?"<>|\r\n]+', "_", vtitle or title)[:60] or "video"
+        await context.bot.send_video(
+            chat_id=chat_id, video=buf,
+            caption=f"🎬 {fname}",
+            supports_streaming=True)
+        await status.delete()
+    except asyncio.TimeoutError:
+        await status.edit_text("❌ 提取超時，影片可能太大或不支援")
+    except Exception as e:
+        log.exception("video callback failed")
+        try:
+            await status.edit_text(f"❌ 出錯：{str(e)[:200]}")
+        except Exception:
+            pass
+
+
 async def song_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyword = " ".join(context.args).strip()
     reply = update.message.reply_to_message
@@ -931,7 +1085,10 @@ def main():
     app.add_handler(CommandHandler("find", find_command))
     app.add_handler(CommandHandler("g", google_search_command))
     app.add_handler(CommandHandler("G", google_search_command))
+    app.add_handler(CommandHandler("v", video_search_command))
+    app.add_handler(CommandHandler("V", video_search_command))
     app.add_handler(CallbackQueryHandler(song_callback, pattern="^song:"))
+    app.add_handler(CallbackQueryHandler(video_callback, pattern="^vid:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, auto_msg_handler))
     app.add_handler(MessageHandler(filters.Sticker.ALL & ~filters.FORWARDED, sticker_msg_handler))
     app.add_handler(MessageHandler(filters.ALL, chatter_bootstrap))
