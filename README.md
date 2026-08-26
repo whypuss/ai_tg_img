@@ -12,6 +12,7 @@ Telegram 生圖 / 多功能 Bot — SenseNova (sensenova-u1-fast) + 多模型輪
 | `/ans <問題>` | 💬 問答：直接問或回覆訊息追問，嚴格 ≤30 字回答 |
 | `/sing <歌名/歌手>` | 🎵 搜歌（joox/netease/kuwo/bilibili 四子源），支援播放 + 下載 |
 | `/g <關鍵詞>` | 🔍 網頁搜索：透過本地 SearXNG（自動選可用引擎，避開 CAPTCHA），返回前 5 條結果 |
+| `/v <關鍵詞>` | 🎬 視頻搜索：SearXNG 搜片 → yt-dlp 提取 → 直接喺 Telegram 播放（≤45MB） |
 | `/find <關鍵字>` | 🔎 搜 Telegram 公開群組/頻道（本地 FTS5 + SearXNG 發現） |
 | `/say <文字>` | 🔊 普通話 TTS（Edge TTS zh-CN-XiaoxiaoNeural） |
 | `/sayc <文字>` | 🔊 粵語 TTS（Edge TTS zh-HK-HiuMaanNeural） |
@@ -55,6 +56,7 @@ python-telegram-bot>=21.0
 openai>=1.0
 httpx>=0.27
 edge-tts
+yt-dlp
 ```
 
 ## 生產部署 (systemd, Maxwell)
