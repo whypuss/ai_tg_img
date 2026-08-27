@@ -692,7 +692,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Google 搜索：/G <關鍵詞>\n"
             "搜圖片：/P <關鍵詞>\n"
             "搜影片（播放）：/V <關鍵詞>\n"
-            "搜 JAV：/M <番號/關鍵詞>\n"
+            "搜 JAV：/M <番號/關鍵詞> 或 /J（Jable 直播源）\n"
             "搜 Telegram 群組：/find <關鍵字>\n"
             "朗讀：/say（普通話）/sayc（粵語）<文字>")
     # 擁有者私聊：底部加面板按鈕
@@ -1439,16 +1439,19 @@ async def song_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
 
-# ================= JAV 搜索 /M =================
+# ================= JAV 搜索 /M（JAVDB + 磁力） =================
 JAV_SEARCH_URL = "https://javdb.com/search"
+JAV_UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+          "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+          "Accept-Language": "zh-TW,zh;q=0.9"}
+
 
 async def _fetch_javdb(query: str) -> list:
     """搜索 JAVDB，返回前 8 個結果"""
     try:
-        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as hc:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers=JAV_UA) as hc:
             params = {"q": query}
-            headers = {"User-Agent": "Mozilla/5.0 (compatible; TelegramBot/1.0)"}
-            r = await hc.get(JAV_SEARCH_URL, params=params, headers=headers)
+            r = await hc.get(JAV_SEARCH_URL, params=params)
             r.raise_for_status()
             html = r.text
     except Exception as e:
@@ -1463,13 +1466,65 @@ async def _fetch_javdb(query: str) -> list:
     pattern = r'<a[^>]+href="/v/([^"]+)"[^>]*class="[^"]*box[^"]*"[^>]*title="([^"]*)"[^>]*>.*?<img[^>]+src="([^"]+)".*?<div class="video-title"><strong>([^<]+)</strong>([^<]*)</div>'
     matches = re.findall(pattern, html, re.DOTALL)
     for vid, title, img, code, subtitle in matches[:8]:
-        # 組合標題
-        full_title = f"{code.strip()} {title.strip()}"
         results.append({
             "id": vid,
             "title": title.strip(),
             "code": code.strip(),
             "url": f"https://javdb.com/v/{vid}",
+            "cover": img,
+        })
+    return results
+
+
+async def _fetch_javdb_magnet(url: str) -> str:
+    """抓取單個 JAVDB 詳情頁，返回第一個磁力連結（無則空字串）"""
+    try:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers=JAV_UA) as hc:
+            r = await hc.get(url)
+            r.raise_for_status()
+            html = r.text
+        m = re.search(r"magnet:\?xt=[^\"'<>]+", html)
+        return m.group(0).replace("&", "&") if m else ""
+    except Exception as e:
+        log.warning("javdb detail failed %s: %s", url, e)
+        return ""
+
+
+# ================= Jable 搜索 /J =================
+JABLE_SEARCH_URL = "https://jable.tv/search"
+JABLE_UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+            "Accept-Language": "zh-TW,zh;q=0.9"}
+
+
+async def _fetch_jable(query: str) -> list:
+    """搜索 Jable.tv，返回前 8 個結果"""
+    try:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers=JABLE_UA) as hc:
+            params = {"q": query}
+            r = await hc.get(JABLE_SEARCH_URL, params=params)
+            r.raise_for_status()
+            html = r.text
+    except Exception as e:
+        log.warning("jable search failed: %s", e)
+        return []
+
+    # 解析 HTML，提取影片資訊
+    results = []
+    import re
+    # Jable 影片卡片結構：
+    # <a class="video" href="/videos/xxx" title="..."><img data-src="...">
+    # <div class="video-title">code title</div>
+    pattern = r'<a[^>]+class="video"[^>]+href="(/videos/[^"]+)"[^>]*title="([^"]*)"[^>]*>.*?<img[^>]+data-src="([^"]+)"[^>]*>.*?<div class="video-title">([^<]+)</div>'
+    matches = re.findall(pattern, html, re.DOTALL)
+    for path, title, img, code_title in matches[:8]:
+        code = code_title.split()[0] if code_title.split() else ""
+        vid = path.split("/")[-1]
+        results.append({
+            "id": vid,
+            "title": title.strip(),
+            "code": code,
+            "url": f"https://jable.tv{path}",
             "cover": img,
         })
     return results
@@ -1506,7 +1561,8 @@ async def jav_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             buf = io.BytesIO(raw)
             buf.seek(0)
             buf.name = "cover.jpg"
-            caption = f"{item['code']} - {item['title'][:80]}\n🔗 {item['url']}"
+            # media group caption 唔支援 markdown link，只顯示文字
+            caption = f"{item['code']} - {item['title'][:80]}"
             media.append(InputMediaPhoto(media=buf, caption=caption))
         if len(media) >= 8:
             break
@@ -1529,6 +1585,76 @@ async def jav_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             except Exception:
                 pass
         await status.delete()
+        return
+
+    # 相簿發送成功後，額外發一條可點擊嘅連結列表
+    link_lines = [f"🔗 JAVDB 連結（{query}）："]
+    for item in results[:len(media)]:
+        link_lines.append(f"• [{item['code']} - {item['title'][:50]}]({item['url']})")
+    await update.message.reply_text("\n".join(link_lines), parse_mode="Markdown",
+                                     disable_web_page_preview=True)
+
+
+async def jable_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Jable 搜索：/J <番號/關鍵詞> → Jable.tv 搜索 → 顯示封面 + 直播頁面連結"""
+    query = " ".join(context.args).strip()
+    if not query and update.message.reply_to_message:
+        query = (update.message.reply_to_message.text or "").strip()
+    if not query:
+        await update.message.reply_text(
+            "用法：/J <番號或關鍵詞>\n例：/J SSIS-001\n例：/J 巨乳")
+        return
+
+    status = await update.message.reply_text(f"🔍 Jable 搜尋「{query}」…")
+    results = await _fetch_jable(query)
+    if not results:
+        await status.edit_text(f"😿 搵唔到「{query}」相關影片")
+        return
+
+    context.user_data["jav_results"] = results  # 共用 key，callback 同用
+
+    # 下載封面圖並行
+    await status.edit_text(f"⬇️ 下載緊 {len(results)} 張封面…")
+    download_tasks = [_download_img(r["cover"]) for r in results]
+    downloaded = await asyncio.gather(*download_tasks)
+
+    # 準備 media group
+    from telegram import InputMediaPhoto
+    media = []
+    for i, (raw, item) in enumerate(zip(downloaded, results)):
+        if raw and len(raw) > 1000:
+            buf = io.BytesIO(raw)
+            buf.seek(0)
+            buf.name = "cover.jpg"
+            caption = f"{item['code']} - {item['title'][:80]}"
+            media.append(InputMediaPhoto(media=buf, caption=caption))
+        if len(media) >= 8:
+            break
+
+    if not media:
+        await status.edit_text("❌ 封面圖下載失敗")
+        return
+
+    try:
+        await context.bot.send_media_group(chat_id=update.message.chat_id, media=media)
+        await status.delete()
+    except Exception as e:
+        log.exception("jable send_media_group failed")
+        for buf, item in zip([m.media for m in media], results):
+            buf.seek(0)
+            try:
+                await update.message.reply_photo(photo=buf, caption=f"{item['code']} - {item['title'][:80]}\n🔗 {item['url']}")
+            except Exception:
+                pass
+        await status.delete()
+        return
+
+    # 相簿後發可點擊連結
+    link_lines = [f"🔗 Jable 連結（{query}）："]
+    for item in results[:len(media)]:
+        link_lines.append(f"• [{item['code']} - {item['title'][:50]}]({item['url']})")
+    await update.message.reply_text("\n".join(link_lines), parse_mode="Markdown",
+                                     disable_web_page_preview=True)
 
 
 # ================= 自動問答 & 深夜胡說 =================
@@ -1753,25 +1879,26 @@ async def _set_bot_commands(app):
     """啟動時向 Telegram 註冊指令選單（底部 / 按鈕彈出）"""
     from telegram import BotCommand, BotCommandScopeDefault, BotCommandScopeChat
 
-    # 所有人可見的指令
+    # 所有人可見的指令（名稱必須全小寫、字母數字下劃線）
     public_cmds = [
-        BotCommand("start", "📖 使用說明"),
-        BotCommand("draw", "🎨 AI 生圖"),
-        BotCommand("redraw", "🖌️ 圖生圖（回覆圖片）"),
-        BotCommand("sum", "📝 總結聊天記錄"),
-        BotCommand("ans", "💬 問問題"),
-        BotCommand("sing", "🎵 搜歌"),
-        BotCommand("find", "🔍 搜 TG 群組"),
-        BotCommand("G", "🔎 Google 搜索"),
-        BotCommand("P", "🖼️ 搜圖片"),
-        BotCommand("V", "🎬 搜影片"),
-        BotCommand("M", "🔞 搜 JAV"),
-        BotCommand("say", "🔊 朗讀（普通話）"),
-        BotCommand("sayc", "🔊 朗讀（粵語）"),
+        BotCommand("start", "使用說明"),
+        BotCommand("draw", "AI 生圖"),
+        BotCommand("redraw", "圖生圖（回覆圖片）"),
+        BotCommand("sum", "總結聊天記錄"),
+        BotCommand("ans", "問問題"),
+        BotCommand("sing", "搜歌"),
+        BotCommand("find", "搜 TG 群組"),
+        BotCommand("g", "Google 搜索"),
+        BotCommand("p", "搜圖片"),
+        BotCommand("v", "搜影片"),
+        BotCommand("m", "搜 JAV (JAVDB)"),
+        BotCommand("j", "搜 JAV (Jable 直播源)"),
+        BotCommand("say", "朗讀（普通話）"),
+        BotCommand("sayc", "朗讀（粵語）"),
     ]
     # 擁有者私聊專屬指令
     owner_cmds = public_cmds + [
-        BotCommand("panel", "🎛️ 管理面板"),
+        BotCommand("panel", "管理面板"),
     ]
     try:
         await app.bot.set_my_commands(public_cmds, scope=BotCommandScopeDefault())
@@ -1815,6 +1942,8 @@ def main():
     app.add_handler(CommandHandler("V", require_auth(video_search_command)))
     app.add_handler(CommandHandler("m", require_auth(jav_search_command)))
     app.add_handler(CommandHandler("M", require_auth(jav_search_command)))
+    app.add_handler(CommandHandler("j", require_auth(jable_search_command)))
+    app.add_handler(CommandHandler("J", require_auth(jable_search_command)))
     app.add_handler(CallbackQueryHandler(song_callback, pattern="^song:"))
     app.add_handler(CallbackQueryHandler(video_callback, pattern="^vid:"))
     app.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin:"))
