@@ -1802,13 +1802,13 @@ async def auto_msg_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _auto_answer(update, context, user_part or "hi", sticker_prob=0.2)
         return
 
-    # ② 問題關鍵字觸發（10% 回應：20% 貼圖 / 80% 文字）
-    if QUESTION_PATTERN.search(text) and random.random() < 0.1:
+    # ② 問題關鍵字觸發（3% 回應：20% 貼圖 / 80% 文字）
+    if QUESTION_PATTERN.search(text) and random.random() < 0.03:
         await _auto_answer(update, context, text, sticker_prob=0.2)
         return
 
-    # ③ 路人隨機回覆（10% 機率會回；回時 70% 貼圖 / 30% 文字）
-    if random.random() < 0.1:
+    # ③ 路人隨機回覆（3% 機率會回；回時 70% 貼圖 / 30% 文字）
+    if random.random() < 0.03:
         await _auto_answer(update, context, text, sticker_prob=0.7)
 
 
@@ -1860,8 +1860,8 @@ async def chatter_loop(context: ContextTypes.DEFAULT_TYPE):
         chat_id = random.choice(group_ids)
         if in_window():
             try:
-                # 機率分布：20% 貼圖 / 80% LLM 文字（由 40% 貼圖改為 20%） 
-                if STICKER_FILE_IDS and random.random() < 0.2:
+                # 機率分布：3% 貼圖 / 97% LLM 文字（由 20% 貼圖改為 3%） 
+                if STICKER_FILE_IDS and random.random() < 0.03:
                     sticker_id = random.choice(STICKER_FILE_IDS)
                     await context.bot.send_sticker(chat_id=chat_id,
                                                     sticker=sticker_id)
