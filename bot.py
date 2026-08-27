@@ -1490,42 +1490,51 @@ async def _fetch_javdb_magnet(url: str) -> str:
         return ""
 
 
-# ================= Jable 搜索 /J =================
-JABLE_SEARCH_URL = "https://jable.tv/search"
-JABLE_UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
-            "Accept-Language": "zh-TW,zh;q=0.9"}
+
+# ================= 正妹AV 搜索 /J (goodav17.com) =================
+GOODAV_SEARCH_URL = "https://goodav17.com/search"
+GOODAV_UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+             "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+             "Accept-Language": "zh-TW,zh;q=0.9"}
 
 
-async def _fetch_jable(query: str) -> list:
-    """搜索 Jable.tv，返回前 8 個結果"""
+async def _fetch_goodav(query: str) -> list:
+    """搜索 goodav17.com (正妹AV)，返回前 8 個結果"""
+    # URL 格式: https://goodav17.com/search/QUERY
+    search_url = f"{GOODAV_SEARCH_URL}/{query}"
     try:
-        async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers=JABLE_UA) as hc:
-            params = {"q": query}
-            r = await hc.get(JABLE_SEARCH_URL, params=params)
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers=GOODAV_UA) as hc:
+            r = await hc.get(search_url)
             r.raise_for_status()
             html = r.text
     except Exception as e:
-        log.warning("jable search failed: %s", e)
+        log.warning("goodav search failed: %s", e)
         return []
 
     # 解析 HTML，提取影片資訊
     results = []
     import re
-    # Jable 影片卡片結構：
-    # <a class="video" href="/videos/xxx" title="..."><img data-src="...">
-    # <div class="video-title">code title</div>
-    pattern = r'<a[^>]+class="video"[^>]+href="(/videos/[^"]+)"[^>]*title="([^"]*)"[^>]*>.*?<img[^>]+data-src="([^"]+)"[^>]*>.*?<div class="video-title">([^<]+)</div>'
+    # 影片卡片結構：
+    # <div class='movie'> ... <a href="URL"><img src='COVER' ... alt='...'> ... <a href="URL">TITLE</a>
+    pattern = r"<div class='movie'>.*?<a href=\"([^\"]+)\">\s*<img[^>]*src='([^']+)'[^>]*alt='([^']+)'[^>]*>.*?<a href=\"[^\"]+\">([^<]+)</a>"
     matches = re.findall(pattern, html, re.DOTALL)
-    for path, title, img, code_title in matches[:8]:
-        code = code_title.split()[0] if code_title.split() else ""
-        vid = path.split("/")[-1]
+    for url, cover, alt, title in matches[:8]:
+        # 從 alt 或 title 提取番號
+        code = ""
+        for text in [alt, title]:
+            m = re.search(r'([A-Z]{2,5}-\d{3,5})', text, re.IGNORECASE)
+            if m:
+                code = m.group(1).upper()
+                break
+        if not code:
+            m = re.search(r'/html/(\d+)', url)
+            code = m.group(1) if m else ""
         results.append({
-            "id": vid,
+            "id": code,
             "title": title.strip(),
             "code": code,
-            "url": f"https://jable.tv{path}",
-            "cover": img,
+            "url": url,
+            "cover": cover,
         })
     return results
 
@@ -1596,7 +1605,7 @@ async def jav_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def jable_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Jable 搜索：/J <番號/關鍵詞> → Jable.tv 搜索 → 顯示封面 + 直播頁面連結"""
+    """正妹AV 搜索：/J <番號/關鍵詞> → goodav17.com 搜索 → 顯示封面 + 播放頁面連結"""
     query = " ".join(context.args).strip()
     if not query and update.message.reply_to_message:
         query = (update.message.reply_to_message.text or "").strip()
@@ -1605,8 +1614,8 @@ async def jable_search_command(update: Update, context: ContextTypes.DEFAULT_TYP
             "用法：/J <番號或關鍵詞>\n例：/J SSIS-001\n例：/J 巨乳")
         return
 
-    status = await update.message.reply_text(f"🔍 Jable 搜尋「{query}」…")
-    results = await _fetch_jable(query)
+    status = await update.message.reply_text(f"🔍 正妹AV 搜尋「{query}」…")
+    results = await _fetch_goodav(query)
     if not results:
         await status.edit_text(f"😿 搵唔到「{query}」相關影片")
         return
@@ -1639,7 +1648,7 @@ async def jable_search_command(update: Update, context: ContextTypes.DEFAULT_TYP
         await context.bot.send_media_group(chat_id=update.message.chat_id, media=media)
         await status.delete()
     except Exception as e:
-        log.exception("jable send_media_group failed")
+        log.exception("goodav send_media_group failed")
         for buf, item in zip([m.media for m in media], results):
             buf.seek(0)
             try:
@@ -1650,7 +1659,7 @@ async def jable_search_command(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     # 相簿後發可點擊連結
-    link_lines = [f"🔗 Jable 連結（{query}）："]
+    link_lines = [f"🔗 正妹AV 連結（{query}）："]
     for item in results[:len(media)]:
         link_lines.append(f"• [{item['code']} - {item['title'][:50]}]({item['url']})")
     await update.message.reply_text("\n".join(link_lines), parse_mode="Markdown",
