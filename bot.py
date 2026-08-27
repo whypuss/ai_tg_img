@@ -1621,14 +1621,19 @@ async def jable_search_command(update: Update, context: ContextTypes.DEFAULT_TYP
         await status.edit_text(f"😿 搵唔到「{query}」相關影片")
         return
 
-    context.user_data["jav_results"] = results  # 共用 key，callback 同用
+    context.user_data["jav_results"] = results
 
     # 下載封面圖並行
     await status.edit_text(f"⬇️ 下載緊 {len(results)} 張封面…")
     download_tasks = [_download_img(r["cover"]) for r in results]
     downloaded = await asyncio.gather(*download_tasks)
+    dl_ok = sum(1 for d in downloaded if d and len(d) > 1000)
+    log.info("GOODAV_DL results=%d dl_ok=%d sizes=%s",
+             len(results), dl_ok, [len(d) if d else 0 for d in downloaded])
+    if dl_ok == 0:
+        await status.edit_text(f"❌ 封面下載失敗（{query}）")
+        return
 
-    # 準備 media group
     from telegram import InputMediaPhoto
     media = []
     for i, (raw, item) in enumerate(zip(downloaded, results)):
