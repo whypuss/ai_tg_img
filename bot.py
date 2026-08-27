@@ -200,6 +200,19 @@ def _wl_btn(chat_id) -> str:
     return "⬆️ 加入白名單"
 
 
+def _escape_md(text: str) -> str:
+    """轉義 Markdown V1 特殊字符"""
+    if not text:
+        return ""
+    return (text
+        .replace("\\", "\\\\")
+        .replace("*", "\\*")
+        .replace("_", "\\_")
+        .replace("`", "\\`")
+        .replace("[", "\\[")
+        .replace("]", "\\]"))
+
+
 async def _panel_edit(q, context, text, kb):
     """編輯面板訊息；訊息被刪就重發"""
     try:
@@ -234,7 +247,7 @@ async def panel_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
           [InlineKeyboardButton(("⛔ 開啟白名單" if not wl["enabled"]
                                  else "✅ 關閉白名單"), callback_data="admin:toggle")]]
     text = (f"🎛️ Bot 管理面板\n\n"
-            f"狀態：{status}\n"
+            f"狀態：{_escape_md(status)}\n"
             f"授權群組：{len(wl['chats'])} 個\n"
             f"授權用戶：{len(wl['users'])} 個\n"
             f"活動群組：{len(reg)} 個\n\n"
@@ -276,7 +289,7 @@ async def panel_chats(update: Update, context: ContextTypes.DEFAULT_TYPE, page: 
         lines.append("_（未授權任何群組）_")
     for cid in chunk:
         info = wl["chats_info"].get(str(cid), {})
-        note = f" — {info['note'][:20]}" if info.get("note") else ""
+        note = f" — {_escape_md(info['note'][:20])}" if info.get("note") else ""
         lines.append(f"`{cid}`{note}")
 
     kb = [[InlineKeyboardButton(f"{c} ⬇️ 移除", callback_data=f"admin:unchat:{c}")
@@ -316,7 +329,7 @@ async def panel_registry(update: Update, context: ContextTypes.DEFAULT_TYPE, pag
     for cid, info in chunk:
         cid_int = int(cid)
         auth = "✅" if cid_int in wl["chats"] else "⬜"
-        title = (info.get("title") or "Unknown")[:25]
+        title = _escape_md((info.get("title") or "Unknown")[:25])
         members = info.get("member_count", "?")
         last = datetime.fromtimestamp(info.get("last_active", 0)).strftime("%m-%d %H:%M")
         lines.append(f"{auth} `{cid_int}` {title} | 👥{members} | {last}")
@@ -354,7 +367,7 @@ async def panel_users(update: Update, context: ContextTypes.DEFAULT_TYPE, page: 
         lines.append("_（未授權任何用戶）_")
     for uid in chunk:
         info = wl["users_info"].get(str(uid), {})
-        note = f" — {info['note'][:20]}" if info.get("note") else ""
+        note = f" — {_escape_md(info['note'][:20])}" if info.get("note") else ""
         lines.append(f"`{uid}`{note}")
 
     kb = [[InlineKeyboardButton(f"{u} ⬇️ 移除", callback_data=f"admin:unuser:{u}")
@@ -384,7 +397,9 @@ async def panel_reg_act(update: Update, context: ContextTypes.DEFAULT_TYPE, cid:
     in_wl = cid_int in wl["chats"]
     wl_info = wl["chats_info"].get(cid, {})
 
-    lines = [f"🌐 群組詳情：{info.get('title', 'Unknown')}\n",
+    title = _escape_md(info.get('title', 'Unknown'))
+    note = _escape_md(wl_info.get('note', '—'))
+    lines = [f"🌐 群組詳情：{title}\n",
              f"Chat ID：`{cid_int}`",
              f"類型：{info.get('type', '?')}",
              f"成員：{info.get('member_count', '?')}",
@@ -392,7 +407,7 @@ async def panel_reg_act(update: Update, context: ContextTypes.DEFAULT_TYPE, cid:
              f"首次發現：{datetime.fromtimestamp(info.get('first_seen', 0)).strftime('%Y-%m-%d %H:%M')}",
              f"最後活躍：{datetime.fromtimestamp(info.get('last_active', 0)).strftime('%Y-%m-%d %H:%M')}",
              f"白名單：{'✅ 已授權' if in_wl else '❌ 未授權'}",
-             f"備註：{wl_info.get('note', '—')}"]
+             f"備註：{note}"]
     kb = [[InlineKeyboardButton("⬇️ 移出白名單" if in_wl else "⬆️ 加入白名單",
                                 callback_data=f"admin:regtoggle:{cid}")],
           [InlineKeyboardButton("🔙 活動記錄", callback_data="admin:reg:0"),
@@ -535,7 +550,7 @@ async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
             "added_at": int(datetime.now().timestamp()),
         }
         save_whitelist(wl)
-    await msg.reply_text(f"✅ 已授權：`{cid}`", parse_mode="Markdown")
+    await msg.reply_text(f"✅ 已授權：`{cid}` ({_escape_md(title)})", parse_mode="Markdown") if title else await msg.reply_text(f"✅ 已授權：`{cid}`", parse_mode="Markdown")
 
 
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
