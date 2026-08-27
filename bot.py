@@ -1132,9 +1132,11 @@ async def _download_img(url: str, timeout: int = 15) -> bytes | None:
                    "Referer": url}
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=headers, verify=False) as hc:
             r = await hc.get(url)
+            log.info("GOODAV_DOWNLOAD url=%s status=%s len=%d", url, r.status_code, len(r.content))
             r.raise_for_status()
             return r.content
-    except Exception:
+    except Exception as e:
+        log.warning("GOODAV_DOWNLOAD_FAIL url=%s err=%s", url, e)
         return None
 
 
