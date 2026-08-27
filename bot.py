@@ -1606,6 +1606,7 @@ async def jav_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def jable_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """正妹AV 搜索：/J <番號/關鍵詞> → goodav17.com 搜索 → 顯示封面 + 播放頁面連結"""
+    log.info("GOODAV_HANDLER_INVOKED query=%s", context.args)
     query = " ".join(context.args).strip()
     if not query and update.message.reply_to_message:
         query = (update.message.reply_to_message.text or "").strip()
