@@ -1113,7 +1113,7 @@ async def _download_img(url: str, timeout: int = 15) -> bytes | None:
     try:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                    "Referer": url}
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=headers) as hc:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=headers, verify=False) as hc:
             r = await hc.get(url)
             r.raise_for_status()
             return r.content
