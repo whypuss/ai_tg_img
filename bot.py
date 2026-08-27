@@ -1111,7 +1111,9 @@ async def google_search_command(update: Update, context: ContextTypes.DEFAULT_TY
 async def _download_img(url: str, timeout: int = 15) -> bytes | None:
     """下載圖片，失敗返回 None"""
     try:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as hc:
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                   "Referer": url}
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=headers) as hc:
             r = await hc.get(url)
             r.raise_for_status()
             return r.content
@@ -1606,22 +1608,11 @@ async def jav_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def jable_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """正妹AV 搜索：/J <番號/關鍵詞> → goodav17.com 搜索 → 顯示封面 + 播放頁面連結"""
-    chat_id = update.message.chat_id
-    msg_text = update.message.text or ""
-    log.info("GOODAV_HANDLER chat=%s text='%s' args=%s", chat_id, msg_text, context.args)
-    try:
-        await update.message.reply_text(f"🔍 收到 /J，搜尋：{' '.join(context.args) or '(無參數)'}")
-    except Exception as e:
-        log.error("GOODAV echo failed: %s", e)
-        return
     query = " ".join(context.args).strip()
     if not query and update.message.reply_to_message:
         query = (update.message.reply_to_message.text or "").strip()
     if not query:
-        try:
-            await update.message.reply_text("用法：/J <番號或關鍵詞>\n例：/J SSIS-001\n例：/J 巨乳")
-        except Exception:
-            pass
+        await update.message.reply_text("用法：/J <番號或關鍵詞>\n例：/J SSIS-001\n例：/J 巨乳")
         return
 
     status = await update.message.reply_text(f"🔍 正妹AV 搜尋「{query}」…")
