@@ -1606,13 +1606,22 @@ async def jav_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def jable_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """正妹AV 搜索：/J <番號/關鍵詞> → goodav17.com 搜索 → 顯示封面 + 播放頁面連結"""
-    log.info("GOODAV_HANDLER_INVOKED query=%s", context.args)
+    chat_id = update.message.chat_id
+    msg_text = update.message.text or ""
+    log.info("GOODAV_HANDLER chat=%s text='%s' args=%s", chat_id, msg_text, context.args)
+    try:
+        await update.message.reply_text(f"🔍 收到 /J，搜尋：{' '.join(context.args) or '(無參數)'}")
+    except Exception as e:
+        log.error("GOODAV echo failed: %s", e)
+        return
     query = " ".join(context.args).strip()
     if not query and update.message.reply_to_message:
         query = (update.message.reply_to_message.text or "").strip()
     if not query:
-        await update.message.reply_text(
-            "用法：/J <番號或關鍵詞>\n例：/J SSIS-001\n例：/J 巨乳")
+        try:
+            await update.message.reply_text("用法：/J <番號或關鍵詞>\n例：/J SSIS-001\n例：/J 巨乳")
+        except Exception:
+            pass
         return
 
     status = await update.message.reply_text(f"🔍 正妹AV 搜尋「{query}」…")
