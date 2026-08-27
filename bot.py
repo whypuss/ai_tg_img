@@ -474,21 +474,34 @@ async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     msg = update.message
 
     cid = None
-    if msg.forward_from_chat:
+    title = ""
+    
+    # 1. 嘗試從 forward_origin 獲取（支援所有類型：Channel、Chat、User、HiddenUser）
+    if msg.forward_origin:
+        fo = msg.forward_origin
+        # MessageOriginChannel / MessageOriginChat
+        if hasattr(fo, 'chat') and fo.chat and hasattr(fo.chat, 'id'):
+            cid = fo.chat.id
+            title = getattr(fo.chat, 'title', '') or getattr(fo.chat, 'username', '') or ''
+        # MessageOriginChannel 可能有 chat_id 直接屬性
+        elif getattr(fo, 'chat_id', None) is not None:
+            cid = fo.chat_id
+            title = getattr(fo, 'chat_name', '') or ''
+        # MessageOriginChat / MessageOriginUser 可能有 sender_chat
+        elif getattr(fo, 'sender_chat_id', None) is not None:
+            cid = fo.sender_chat_id
+            title = getattr(fo, 'sender_chat_name', '') or ''
+        # MessageOriginUser / HiddenUser - 私人轉發無群組 ID
+        elif getattr(fo, 'sender_user', None) is not None:
+            pass  # 私人轉發，忽略
+    # 2. 兼容舊版 forward_from_chat
+    elif msg.forward_from_chat:
         cid = msg.forward_from_chat.id
         title = msg.forward_from_chat.title or ""
-    elif msg.forward_origin:
-        fo = msg.forward_origin
-        # Telegram 有時 forward_from_chat 是 None，但 forward_origin.chat_id 有
-        if fo.chat_id is not None:
-            cid = fo.chat_id
-            title = fo.chat_name or ""
-        elif fo.sender_chat_id is not None:
-            cid = fo.sender_chat_id
-            title = fo.sender_chat_name or ""
+    # 3. 文字解析：純數字 chat_id 或 t.me 連結
     elif msg.text:
         txt = msg.text.strip()
-        m = re.search(r"-?\d{5,}", txt)   # 任意負/正長數字
+        m = re.search(r"-?\d{5,}", txt)
         if m:
             cid = int(m.group(0))
         else:
@@ -504,7 +517,7 @@ async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     return
 
     if cid is None:
-        await msg.reply_text("❌ 無法解析群組 ID，請用 /panel 再試，或直接發送數字的 chat_id")
+        await msg.reply_text("❌ 無法解析群組 ID，請用 /panel 再試，或直接發送數字的 chat_id / 轉發群組消息")
         return
 
     if cid >= 0:
@@ -518,7 +531,7 @@ async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if cid not in wl["chats"]:
         wl["chats"].append(cid)
         wl["chats_info"][str(cid)] = {
-            "note": title if locals().get("title") else f"manual {datetime.now().strftime('%m-%d')}",
+            "note": title if title else f"manual {datetime.now().strftime('%m-%d')}",
             "added_at": int(datetime.now().timestamp()),
         }
         save_whitelist(wl)
@@ -565,6 +578,11 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.exception("admin callback error: %s data=%s", e, q.data)
         try:
             await q.answer(f"❌ 出錯：{str(e)[:60]}", show_alert=True)
+        except Exception:
+            pass
+        # 發生錯誤時回到主面板
+        try:
+            await panel_home(update, context)
         except Exception:
             pass
 
@@ -1906,9 +1924,13 @@ async def chatter_bootstrap(update: Update, context: ContextTypes.DEFAULT_TYPE):
     asyncio.create_task(chatter_loop(context))
 
 
+async def _record_group_early(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """最早執行的 handler：記錄所有群組活動到註冊表（命令、媒體、貼圖、轉發全部涵蓋）"""
+    await register_group(update, context)
+
+
 async def _record_and_chatter(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """最後一個 ALL handler：確保所有群組消息都被記錄到註冊表"""
-    # 記錄群組到註冊表（命令、媒體、貼圖、轉發全部涵蓋）
+    """最後一個 ALL handler：確保所有群組消息都被記錄到註冊表（備用雙重保障）"""
     await register_group(update, context)
 
 
@@ -1961,6 +1983,8 @@ def main():
            .connect_timeout(15).pool_timeout(30)
            .post_init(_set_bot_commands)
            .build())
+    # 最早記錄群組（最優先，在所有 auth/check 之前）
+    app.add_handler(MessageHandler(filters.ALL, _record_group_early))
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("panel", panel_command))
     app.add_handler(CommandHandler("draw", require_auth(draw_command)))
@@ -1986,7 +2010,7 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, auto_msg_handler))
     app.add_handler(MessageHandler(filters.Sticker.ALL & ~filters.FORWARDED, sticker_msg_handler))
-    # 最後一個 ALL handler：記錄所有群組消息到註冊表（命令、媒體、貼圖都會記錄）
+    # 最後一個 ALL handler：雙重保障記錄群組
     app.add_handler(MessageHandler(filters.ALL, _record_and_chatter))
     log.info("Draw bot started")
     app.run_polling()
