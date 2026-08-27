@@ -158,7 +158,6 @@ async def register_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     cid = str(chat.id)
     data = load_groups_registry()
-    wl = load_whitelist()
     try:
         member_count = await context.bot.get_chat_member_count(chat.id)
     except Exception:
@@ -206,9 +205,16 @@ async def _panel_edit(q, context, text, kb):
     try:
         await q.edit_message_text(text, reply_markup=kb,
                                   parse_mode="Markdown", disable_web_page_preview=True)
-    except Exception:
-        await q.message.reply_text(text, reply_markup=kb,
-                                   parse_mode="Markdown", disable_web_page_preview=True)
+    except Exception as e:
+        # 面板訊息被刪除、過期或不在同一會話：重發
+        log.warning("panel edit failed: %s", e)
+        try:
+            chat_id = q.message.chat_id if q.message else q.chat_id
+            await context.bot.send_message(
+                chat_id=chat_id, text=text, reply_markup=kb,
+                parse_mode="Markdown", disable_web_page_preview=True)
+        except Exception as e2:
+            log.error("panel re-send failed: %s", e2)
 
 
 async def panel_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -468,9 +474,18 @@ async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     msg = update.message
 
     cid = None
-    if msg.forward_from_chat:  # 轉發群組訊息
+    if msg.forward_from_chat:
         cid = msg.forward_from_chat.id
         title = msg.forward_from_chat.title or ""
+    elif msg.forward_origin:
+        fo = msg.forward_origin
+        # Telegram 有時 forward_from_chat 是 None，但 forward_origin.chat_id 有
+        if fo.chat_id is not None:
+            cid = fo.chat_id
+            title = fo.chat_name or ""
+        elif fo.sender_chat_id is not None:
+            cid = fo.sender_chat_id
+            title = fo.sender_chat_name or ""
     elif msg.text:
         txt = msg.text.strip()
         m = re.search(r"-?\d{5,}", txt)   # 任意負/正長數字
@@ -518,6 +533,8 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update):
         await q.answer("❌ 無權限", show_alert=True)
         return
+    # 清理面板等待狀態，避免 callback 被誤捕獲
+    context.user_data.pop("admin_waiting", None)
     try:
         parts = q.data.split(":")
         action = parts[1] if len(parts) > 1 else "home"
@@ -545,7 +562,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await panel_home(update, context)
     except Exception as e:
-        log.exception("admin callback error: %s", q.data)
+        log.exception("admin callback error: %s data=%s", e, q.data)
         try:
             await q.answer(f"❌ 出錯：{str(e)[:60]}", show_alert=True)
         except Exception:
@@ -1628,10 +1645,8 @@ async def jable_search_command(update: Update, context: ContextTypes.DEFAULT_TYP
     download_tasks = [_download_img(r["cover"]) for r in results]
     downloaded = await asyncio.gather(*download_tasks)
     dl_ok = sum(1 for d in downloaded if d and len(d) > 1000)
-    log.info("GOODAV_DL results=%d dl_ok=%d sizes=%s",
-             len(results), dl_ok, [len(d) if d else 0 for d in downloaded])
     if dl_ok == 0:
-        await status.edit_text(f"❌ 封面下載失敗（{query}）")
+        await status.edit_text(f"❌ 封面下載失敗")
         return
 
     from telegram import InputMediaPhoto
@@ -1756,8 +1771,7 @@ async def auto_msg_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_admin_input(update, context)
         return
 
-    # 記錄群組到註冊表（靠 msg 作最大努力）
-    await register_group(update, context)
+    # 記錄群組到註冊表（已由 pre_update_handler 處理，此處不再重複）
 
     # 記錄聊天
     name = msg.from_user.full_name if msg.from_user else "?"
@@ -1890,6 +1904,12 @@ async def chatter_bootstrap(update: Update, context: ContextTypes.DEFAULT_TYPE):
     asyncio.create_task(chatter_loop(context))
 
 
+async def _record_and_chatter(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """最後一個 ALL handler：確保所有群組消息都被記錄到註冊表"""
+    # 記錄群組到註冊表（命令、媒體、貼圖、轉發全部涵蓋）
+    await register_group(update, context)
+
+
 async def _set_bot_commands(app):
     """啟動時向 Telegram 註冊指令選單（底部 / 按鈕彈出）"""
     from telegram import BotCommand, BotCommandScopeDefault, BotCommandScopeChat
@@ -1964,7 +1984,8 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, auto_msg_handler))
     app.add_handler(MessageHandler(filters.Sticker.ALL & ~filters.FORWARDED, sticker_msg_handler))
-    app.add_handler(MessageHandler(filters.ALL, chatter_bootstrap))
+    # 最後一個 ALL handler：記錄所有群組消息到註冊表（命令、媒體、貼圖都會記錄）
+    app.add_handler(MessageHandler(filters.ALL, _record_and_chatter))
     log.info("Draw bot started")
     app.run_polling()
 
