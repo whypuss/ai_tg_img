@@ -201,23 +201,20 @@ def _wl_btn(chat_id) -> str:
 
 
 def _escape_md(text: str) -> str:
-    """轉義 Markdown V1 特殊字符"""
+    """轉義 MarkdownV2 特殊字符（_ * [ ] ( ) ~ ` > # + - = | { } . !）"""
     if not text:
         return ""
-    return (text
-        .replace("\\", "\\\\")
-        .replace("*", "\\*")
-        .replace("_", "\\_")
-        .replace("`", "\\`")
-        .replace("[", "\\[")
-        .replace("]", "\\]"))
+    special = r"_*[]()~`>#+-=|{}.!"
+    for ch in special:
+        text = text.replace(ch, "\\" + ch)
+    return text
 
 
 async def _panel_edit(q, context, text, kb):
     """編輯面板訊息；訊息被刪就重發"""
     try:
         await q.edit_message_text(text, reply_markup=kb,
-                                  parse_mode="Markdown", disable_web_page_preview=True)
+                                  parse_mode="MarkdownV2", disable_web_page_preview=True)
     except Exception as e:
         # 面板訊息被刪除、過期或不在同一會話：重發
         log.warning("panel edit failed: %s", e)
@@ -225,7 +222,7 @@ async def _panel_edit(q, context, text, kb):
             chat_id = q.message.chat_id if q.message else q.chat_id
             await context.bot.send_message(
                 chat_id=chat_id, text=text, reply_markup=kb,
-                parse_mode="Markdown", disable_web_page_preview=True)
+                parse_mode="MarkdownV2", disable_web_page_preview=True)
         except Exception as e2:
             log.error("panel re-send failed: %s", e2)
 
@@ -539,7 +536,7 @@ async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await msg.reply_text(
             "❌ Chat ID 必須係負數（群組），例如 `-1001234567890`。\n"
             "用戶 ID 授權請用 /panel → 👤 已授權用戶",
-            parse_mode="Markdown")
+            parse_mode="MarkdownV2")
         return
 
     wl = load_whitelist()
@@ -550,7 +547,7 @@ async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
             "added_at": int(datetime.now().timestamp()),
         }
         save_whitelist(wl)
-    await msg.reply_text(f"✅ 已授權：`{cid}` ({_escape_md(title)})", parse_mode="Markdown") if title else await msg.reply_text(f"✅ 已授權：`{cid}`", parse_mode="Markdown")
+    await msg.reply_text(f"✅ 已授權：`{cid}` ({_escape_md(title)})", parse_mode="MarkdownV2") if title else await msg.reply_text(f"✅ 已授權：`{cid}`", parse_mode="MarkdownV2")
 
 
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1110,7 +1107,7 @@ async def find_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"   👥 {r.members:,} 成員\n"
             f"   {desc}")
     lines.append("\n💡 資料庫會持續自動累積新群組")
-    await status.edit_text("\n".join(lines), parse_mode="Markdown",
+    await status.edit_text("\n".join(lines), parse_mode="MarkdownV2",
                            disable_web_page_preview=True)
 
 
@@ -1154,7 +1151,7 @@ async def google_search_command(update: Update, context: ContextTypes.DEFAULT_TY
         lines.append(f"{i}. [{title}]({url})\n   {snippet}…\n   🔧 {', '.join(engines) if engines else '未知'}")
 
     text = "\n".join(lines) + "\n\n💡 結果來自 SearXNG 可用引擎"
-    await status.edit_text(text, parse_mode="Markdown", disable_web_page_preview=True)
+    await status.edit_text(text, parse_mode="MarkdownV2", disable_web_page_preview=True)
 
 
 # ================= 圖片搜索 /P =================
@@ -1654,7 +1651,7 @@ async def jav_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     link_lines = [f"🔗 JAVDB 連結（{query}）："]
     for item in results[:len(media)]:
         link_lines.append(f"• [{item['code']} - {item['title'][:50]}]({item['url']})")
-    await update.message.reply_text("\n".join(link_lines), parse_mode="Markdown",
+    await update.message.reply_text("\n".join(link_lines), parse_mode="MarkdownV2",
                                      disable_web_page_preview=True)
 
 
@@ -1718,7 +1715,7 @@ async def jable_search_command(update: Update, context: ContextTypes.DEFAULT_TYP
     link_lines = [f"🔗 正妹AV 連結（{query}）："]
     for item in results[:len(media)]:
         link_lines.append(f"• [{item['code']} - {item['title'][:50]}]({item['url']})")
-    await update.message.reply_text("\n".join(link_lines), parse_mode="Markdown",
+    await update.message.reply_text("\n".join(link_lines), parse_mode="MarkdownV2",
                                      disable_web_page_preview=True)
 
 
