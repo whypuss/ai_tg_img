@@ -8,6 +8,7 @@ import logging
 import os
 import random
 import re
+import inspect
 from datetime import datetime, timedelta
 from functools import wraps
 from urllib.parse import urlparse, quote_plus
@@ -39,6 +40,13 @@ CHAT_MODEL_POOL = [
     ("sn-6.7",      lambda: client, "sensenova-6.7-flash-lite"),
 ]
 
+# 快線：tag / ans 專用（走 litellm 4002 網關，有 fallback，最快）
+FAST_POOL = [
+    ("litellm-sn68",   lambda: litellm_client, "sn-6.8-flash-lite"),
+    ("litellm-default",lambda: litellm_client, "default"),
+    ("litellm-gmi-m3", lambda: litellm_client, "gmi-m3"),
+]
+
 def _next_pool_idx(context: ContextTypes.DEFAULT_TYPE) -> int:
     idx = context.bot_data.get("pool_idx", 0)
     context.bot_data["pool_idx"] = (idx + 1) % len(CHAT_MODEL_POOL)
@@ -46,12 +54,14 @@ def _next_pool_idx(context: ContextTypes.DEFAULT_TYPE) -> int:
 
 async def _chat_complete(context: ContextTypes.DEFAULT_TYPE,
                          system_prompt: str, user_msg: str,
-                         max_tokens: int = 1024) -> str:
-    start = _next_pool_idx(context)
+                         max_tokens: int = 1024,
+                         pool=None, timeout: int = 25) -> str:
+    use_pool = pool if pool is not None else CHAT_MODEL_POOL
+    start = _next_pool_idx(context) % len(use_pool)
     errors = []
-    for i in range(len(CHAT_MODEL_POOL)):
-        idx = (start + i) % len(CHAT_MODEL_POOL)
-        label, client_fn, model = CHAT_MODEL_POOL[idx]
+    for i in range(len(use_pool)):
+        idx = (start + i) % len(use_pool)
+        label, client_fn, model = use_pool[idx]
         try:
             c = client_fn()
             # 每個模型最多等 25 秒，避免 429 retry 疊加令回應延遲幾分鐘
@@ -61,7 +71,7 @@ async def _chat_complete(context: ContextTypes.DEFAULT_TYPE,
                     messages=[{"role": "system", "content": system_prompt},
                               {"role": "user", "content": user_msg}],
                     max_tokens=max_tokens),
-                timeout=25)
+                timeout=timeout)
             raw = resp.choices[0].message.content
             if raw and raw.strip():
                 return raw.strip()
@@ -70,6 +80,30 @@ async def _chat_complete(context: ContextTypes.DEFAULT_TYPE,
             log.warning("pool skip %s: %s", label, e)
             errors.append(f"{label}: {e}")
     raise RuntimeError("所有模型輪詢完都失敗：" + " | ".join(errors[-5:]))
+
+async def _chat_complete_fast(context, system_prompt, user_msg, max_tokens=80, timeout=12) -> str:
+    """快線：FAST_POOL 3 模型併發，邊個先返就用邊個（用於 tag / ans）"""
+    import asyncio as _asyncio
+    async def one(label, client_fn, model):
+        try:
+            c = client_fn()
+            resp = await _asyncio.wait_for(
+                c.chat.completions.create(model=model, messages=[{"role":"system","content":system_prompt},{"role":"user","content":user_msg}], max_tokens=max_tokens),
+                timeout=timeout)
+            raw = resp.choices[0].message.content
+            if raw and raw.strip():
+                return raw.strip()
+            raise RuntimeError(f"{label}: empty")
+        except Exception as e:
+            raise RuntimeError(f"{label}: {e}")
+    tasks = [one(l, fn, m) for l, fn, m in FAST_POOL]
+    # as_completed 搶答
+    for fut in _asyncio.as_completed(tasks):
+        try:
+            return await fut
+        except Exception:
+            continue
+    raise RuntimeError("快線 3 模型全部失敗")
 
 SIZES = {
     "1:1": "2048x2048",
@@ -85,6 +119,9 @@ logging.basicConfig(level=logging.INFO,
 log = logging.getLogger("drawbot")
 
 client = AsyncOpenAI(api_key=SENSENOVA_API_KEY, base_url=SENSENOVA_BASE_URL)
+LITELLM_API_KEY = os.environ.get("LITELLM_API_KEY", "")  # 在 Maxwell .env 設 LITELLM_API_KEY
+LITELLM_BASE_URL = os.environ.get("LITELLM_BASE_URL", "http://192.168.31.55:4002/v1")
+litellm_client = AsyncOpenAI(api_key=LITELLM_API_KEY, base_url=LITELLM_BASE_URL)
 
 # ================= 管理面板：白名單 & 群組註冊表 =================
 # 起步先用：Bot 擁有者 user ID（@userinfobot 查自己），冇設就所有人唔受限制
@@ -129,6 +166,40 @@ def load_groups_registry() -> dict:
 
 def save_groups_registry(data: dict):
     _save_json(GROUPS_REGISTRY_FILE, data)
+
+
+# ================= 自動回覆設定（獨立於 whitelist，零干擾授權邏輯） =================
+SETTINGS_FILE = os.path.join(BASE_DIR, "settings.json")
+DEFAULT_SETTINGS = {
+    "auto_text": True,      # 全局總開關：自動回文字
+    "auto_sticker": True,   # 全局總開關：自動回貼圖
+    "tag": {"text_on": True, "sticker_on": True, "trigger_pct": 100, "sticker_pct": 20},
+    "question": {"text_on": True, "sticker_on": True, "trigger_pct": 10, "sticker_pct": 20},
+    "random": {"text_on": True, "sticker_on": True, "trigger_pct": 10, "sticker_pct": 70},
+}
+
+def _normalize_settings(d: dict) -> dict:
+    # 遷移舊結構：active -> tag + question
+    if "active" in d and "tag" not in d:
+        d["tag"] = d.pop("active")
+    if "tag" in d and "question" not in d:
+        d["question"] = {"trigger_pct": 10, "sticker_pct": 20}
+        d.pop("active", None)
+    for k, v in DEFAULT_SETTINGS.items():
+        if isinstance(v, dict):
+            d.setdefault(k, {})
+            for kk, vv in v.items():
+                d[k].setdefault(kk, vv)
+        else:
+            d.setdefault(k, v)
+    return d
+
+SETTINGS = _normalize_settings(_load_json(SETTINGS_FILE) or {})
+
+def save_settings(data: dict):
+    global SETTINGS
+    SETTINGS = _normalize_settings(data)
+    _save_json(SETTINGS_FILE, SETTINGS)
 
 
 def is_owner(update: Update) -> bool:
@@ -201,13 +272,12 @@ def _wl_btn(chat_id) -> str:
 
 
 def _escape_md(text: str) -> str:
-    """轉義 MarkdownV2 特殊字符（_ * [ ] ( ) ~ ` > # + - = | { } . !）"""
+    """Escape MarkdownV2 special chars (Telegram official set).
+    Special: _ * [ ] ( ) ~ ` > # + - = | { } . ! and backslash itself.
+    Use a single regex sub so each char is escaped exactly once."""
     if not text:
         return ""
-    special = r"_*[]()~`>#+-=|{}.!"
-    for ch in special:
-        text = text.replace(ch, "\\" + ch)
-    return text
+    return re.sub(r"([_ *\[\]()~`>#+\-=|{}.!])", r"\\\1", text)
 
 
 async def _panel_edit(q, context, text, kb):
@@ -242,13 +312,14 @@ async def panel_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
           [InlineKeyboardButton("🌐 群組活動記錄", callback_data="admin:reg:0")],
           [InlineKeyboardButton("👤 已授權用戶", callback_data="admin:users:0")],
           [InlineKeyboardButton(("⛔ 開啟白名單" if not wl["enabled"]
-                                 else "✅ 關閉白名單"), callback_data="admin:toggle")]]
+                                 else "✅ 關閉白名單"), callback_data="admin:toggle")],
+          [InlineKeyboardButton(_escape_md("⚙️ 自動回覆設定"), callback_data="admin:settings")]]
     text = (f"🎛️ Bot 管理面板\n\n"
             f"狀態：{_escape_md(status)}\n"
-            f"授權群組：{len(wl['chats'])} 個\n"
-            f"授權用戶：{len(wl['users'])} 個\n"
-            f"活動群組：{len(reg)} 個\n\n"
-            f"OWNER_ID：{'已設定' if OWNER_ID else '未設定（私聊可管）'}")
+            f"授權群組：{_escape_md(str(len(wl['chats'])))} 個\n"
+            f"授權用戶：{_escape_md(str(len(wl['users'])))} 個\n"
+            f"活動群組：{_escape_md(str(len(reg)))} 個\n\n"
+            f"{_escape_md('OWNER_ID')}：{_escape_md('已設定' if OWNER_ID else '未設定（私聊可管）')}")
     await _panel_edit(q, context, text, InlineKeyboardMarkup(kb))
 
 
@@ -281,9 +352,9 @@ async def panel_chats(update: Update, context: ContextTypes.DEFAULT_TYPE, page: 
     start = page * PAGE_SIZE
     chunk = wl_chats[start:start + PAGE_SIZE]
 
-    lines = [f"📋 已授權群組（{total} 個）\n"]
+    lines = [f"{_escape_md('📋 已授權群組')}（{_escape_md(str(total))} 個）\n"]
     if not chunk:
-        lines.append("_（未授權任何群組）_")
+        lines.append(_escape_md("_（未授權任何群組）_"))
     for cid in chunk:
         info = wl["chats_info"].get(str(cid), {})
         note = f" — {_escape_md(info['note'][:20])}" if info.get("note") else ""
@@ -308,34 +379,56 @@ async def panel_chats(update: Update, context: ContextTypes.DEFAULT_TYPE, page: 
 
 
 async def panel_registry(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 0):
-    """群組活動記錄（分頁，含白名單狀態標記）"""
+    """群組活動記錄（分頁，含白名單狀態標記）
+    合併 whitelist（授權群組）+ registry（活動記錄），確保所有授權群組都顯示，
+    方便觀察邊個群組有冇被用（包括授權但未活躍、或未授權但出現過嘅「偷用」）。"""
     q = update.callback_query
     await q.answer()
     wl = load_whitelist()
     reg = load_groups_registry()
-    items = sorted(reg.items(), key=lambda kv: -kv[1].get("last_active", 0))
+    # 合併：所有授權群組 + 所有活動記錄群組
+    all_cids = set(str(c) for c in wl["chats"]) | set(reg.keys())
+    merged = {}
+    for cid in all_cids:
+        info = reg.get(cid, {})
+        merged[cid] = info
+    # 排序：有 last_active 嘅按時間排，未活躍嘅排最後
+    items = sorted(
+        merged.items(),
+        key=lambda kv: -(kv[1].get("last_active", 0) or 0)
+    )
     if page < 0:
         page = 0
     total = len(items)
     start = page * PAGE_SIZE
     chunk = items[start:start + PAGE_SIZE]
 
-    lines = [f"🌐 群組活動記錄（{total} 個）\n"]
+    lines = [f"{_escape_md('🌐 群組活動記錄')}（{_escape_md(str(total))} 個）\n"]
     if not chunk:
-        lines.append("_（尚未有任何群組活動）_")
+        lines.append(_escape_md("_（尚未有任何群組）_"))
     for cid, info in chunk:
         cid_int = int(cid)
-        auth = "✅" if cid_int in wl["chats"] else "⬜"
+        is_auth = cid_int in wl["chats"]
+        # 授權狀態：✅ 已授權 / ⬜ 未授權（可能係偷用）
+        auth = "✅" if is_auth else "⬜"
         title = _escape_md((info.get("title") or "Unknown")[:25])
-        members = info.get("member_count", "?")
-        last = datetime.fromtimestamp(info.get("last_active", 0)).strftime("%m-%d %H:%M")
-        lines.append(f"{auth} `{cid_int}` {title} | 👥{members} | {last}")
+        members = _escape_md(str(info.get("member_count", "?")))
+        last_ts = info.get("last_active", 0) or 0
+        if last_ts:
+            last = _escape_md(datetime.fromtimestamp(last_ts).strftime("%m-%d %H:%M"))
+            lines.append(f"{auth} `{cid_int}` {title} {_escape_md('|')} 👥{members} {_escape_md('|')} {last}")
+        else:
+            # 授權但未活躍：標記未活躍，方便觀察誰冇用過
+            lines.append(f"{auth} `{cid_int}` {title} {_escape_md('|')} 👥{members} {_escape_md('|')} ⚠️ 未活躍")
 
-    kb = [[InlineKeyboardButton(
-        f"{'⬇️' if int(cid) in wl['chats'] else '⬆️'} {info.get('title', '')[:12]}",
-        callback_data=f"admin:regact:{cid}") for cid, info in chunk]]
-    # 一列最多 2 個，過多的換行
-    kb = [kb[0][i:i + 2] for i in range(0, len(kb[0]), 2)] if kb and kb[0] else []
+    kb = []
+    for cid, info in chunk:
+        cid_int = int(cid)
+        is_auth = cid_int in wl["chats"]
+        label = f"{'⬇️' if is_auth else '⬆️'} {(info.get('title') or str(cid))[:12]}"
+        kb.append(InlineKeyboardButton(label, callback_data=f"admin:regact:{cid}"))
+    # 一列最多 2 個
+    kb = [kb[i:i + 2] for i in range(0, len(kb), 2)] if kb else []
     nav = []
     if page > 0:
         nav.append(InlineKeyboardButton("⬅️", callback_data=f"admin:reg:{page - 1}"))
@@ -343,7 +436,7 @@ async def panel_registry(update: Update, context: ContextTypes.DEFAULT_TYPE, pag
         nav.append(InlineKeyboardButton("➡️", callback_data=f"admin:reg:{page + 1}"))
     if nav:
         kb.append(nav)
-    kb.append([InlineKeyboardButton("🔙 主面板", callback_data="admin:home")])
+    kb.append([InlineKeyboardButton(_escape_md("🔙 主面板"), callback_data="admin:home")])
     await _panel_edit(q, context, "\n".join(lines), InlineKeyboardMarkup(kb))
 
 
@@ -359,9 +452,9 @@ async def panel_users(update: Update, context: ContextTypes.DEFAULT_TYPE, page: 
     start = page * PAGE_SIZE
     chunk = wl_users[start:start + PAGE_SIZE]
 
-    lines = [f"👤 已授權用戶（{total} 個）\n"]
+    lines = [f"{_escape_md('👤 已授權用戶')}（{_escape_md(str(total))} 個）\n"]
     if not chunk:
-        lines.append("_（未授權任何用戶）_")
+        lines.append(_escape_md("_（未授權任何用戶）_"))
     for uid in chunk:
         info = wl["users_info"].get(str(uid), {})
         note = f" — {_escape_md(info['note'][:20])}" if info.get("note") else ""
@@ -379,8 +472,81 @@ async def panel_users(update: Update, context: ContextTypes.DEFAULT_TYPE, page: 
         nav.append(InlineKeyboardButton("➡️", callback_data=f"admin:users:{page + 1}"))
     if nav:
         kb.append(nav)
-    kb.append([InlineKeyboardButton("🔙 主面板", callback_data="admin:home")])
+    kb.append([InlineKeyboardButton(_escape_md("🔙 主面板"), callback_data="admin:home")])
+    kb.append([InlineKeyboardButton(_escape_md("➕ 添加用戶（用戶自加）"), callback_data="admin:adduser:prompt")])
     await _panel_edit(q, context, "\n".join(lines), InlineKeyboardMarkup(kb))
+
+
+async def panel_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """自動回覆設定：全局總開關 + 三類各自文字/貼圖開關 + 概率"""
+    q = update.callback_query
+    await q.answer()
+    tag = SETTINGS["tag"]; qn = SETTINGS["question"]; rnd = SETTINGS["random"]
+    def yn(b): return "✅" if b else "⛔"
+    def grp_line(g, name):
+        return (f"{_escape_md(name)}\n"
+                f"  文字{yn(g['text_on'])}  貼圖{yn(g['sticker_on'])}  "
+                f"觸發{_escape_md(str(g['trigger_pct']))}% 貼圖佔比{_escape_md(str(g['sticker_pct']))}%")
+    lines = [
+        f"{_escape_md('⚙️ 自動回覆設定')}\n",
+        f"總開關  文字{yn(SETTINGS['auto_text'])}  貼圖{yn(SETTINGS['auto_sticker'])}\n",
+        grp_line(tag, "📣 @bot 主動"),
+        grp_line(qn, "❓ 問題關鍵字"),
+        grp_line(rnd, "🎲 路人隨機"),
+    ]
+    def tgl(grp, kind):  # kind = text / sticker
+        return InlineKeyboardButton(
+            f"{'📣' if grp=='tag' else '❓' if grp=='question' else '🎲'}{'文字' if kind=='text' else '貼圖'}{yn(SETTINGS[grp][kind+'_on'])}",
+            callback_data=f"admin:tg2:{grp}:{kind}")
+    kb = [
+        [InlineKeyboardButton(_escape_md("🔤 總文字 " + yn(SETTINGS["auto_text"])),
+                              callback_data="admin:tgl:text"),
+         InlineKeyboardButton(_escape_md("💬 總貼圖 " + yn(SETTINGS["auto_sticker"])),
+                              callback_data="admin:tgl:sticker")],
+        [tgl("tag", "text"), tgl("tag", "sticker")],
+        [tgl("question", "text"), tgl("question", "sticker")],
+        [tgl("random", "text"), tgl("random", "sticker")],
+    ]
+    # 概率行（每組 trigger + sticker）
+    for grp, icon in (("tag", "📣"), ("question", "❓"), ("random", "🎲")):
+        kb.append([
+            InlineKeyboardButton(f"{icon}觸發-", callback_data=f"admin:prob:{grp}:trigger:dec"),
+            InlineKeyboardButton(f"{icon}觸發+", callback_data=f"admin:prob:{grp}:trigger:inc"),
+            InlineKeyboardButton(f"{icon}貼%-", callback_data=f"admin:prob:{grp}:sticker:dec"),
+            InlineKeyboardButton(f"{icon}貼%+", callback_data=f"admin:prob:{grp}:sticker:inc"),
+        ])
+    kb.append([InlineKeyboardButton(_escape_md("🔙 主面板"), callback_data="admin:home")])
+    await _panel_edit(q, context, "\n".join(lines), InlineKeyboardMarkup(kb))
+
+
+async def panel_tgl_setting(update: Update, context: ContextTypes.DEFAULT_TYPE, key: str):
+    """全局總開關 toggle（admin:tgl:text / admin:tgl:sticker）"""
+    if key not in ("text", "sticker"):
+        await panel_settings(update, context)
+        return
+    SETTINGS["auto_" + key] = not SETTINGS["auto_" + key]
+    save_settings(SETTINGS)
+    await panel_settings(update, context)
+
+
+async def panel_tgl_group(update: Update, context: ContextTypes.DEFAULT_TYPE, grp: str, kind: str):
+    """每類開關 toggle（admin:tg2:<grp>:<text|sticker>）"""
+    if grp in SETTINGS and kind in ("text", "sticker"):
+        SETTINGS[grp][kind + "_on"] = not SETTINGS[grp][kind + "_on"]
+        save_settings(SETTINGS)
+    await panel_settings(update, context)
+
+
+async def panel_prob_adjust(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                            grp: str, field: str, direction: str):
+    # callback_data 用簡短名 (trigger/sticker)，映射到 settings key (trigger_pct/sticker_pct)
+    field_map = {"trigger": "trigger_pct", "sticker": "sticker_pct"}
+    real_field = field_map.get(field, field)
+    if grp in SETTINGS and real_field in SETTINGS[grp]:
+        delta = 10 if direction == "inc" else -10
+        SETTINGS[grp][real_field] = max(0, min(100, SETTINGS[grp][real_field] + delta))
+        save_settings(SETTINGS)
+    await panel_settings(update, context)
 
 
 async def panel_reg_act(update: Update, context: ContextTypes.DEFAULT_TYPE, cid: str):
@@ -395,20 +561,27 @@ async def panel_reg_act(update: Update, context: ContextTypes.DEFAULT_TYPE, cid:
     wl_info = wl["chats_info"].get(cid, {})
 
     title = _escape_md(info.get('title', 'Unknown'))
+    grp_type = _escape_md(info.get('type', '?'))
+    members = _escape_md(str(info.get('member_count', '?')))
+    username = _escape_md(info.get('username', '—') or '—')
+    first_seen = _escape_md(datetime.fromtimestamp(info.get('first_seen', 0)).strftime('%Y-%m-%d %H:%M'))
+    last_active = _escape_md(datetime.fromtimestamp(info.get('last_active', 0)).strftime('%Y-%m-%d %H:%M'))
+    wl_status = _escape_md('✅ 已授權' if in_wl else '❌ 未授權')
     note = _escape_md(wl_info.get('note', '—'))
-    lines = [f"🌐 群組詳情：{title}\n",
-             f"Chat ID：`{cid_int}`",
-             f"類型：{info.get('type', '?')}",
-             f"成員：{info.get('member_count', '?')}",
-             f"User/name：@{info.get('username', '—')}",
-             f"首次發現：{datetime.fromtimestamp(info.get('first_seen', 0)).strftime('%Y-%m-%d %H:%M')}",
-             f"最後活躍：{datetime.fromtimestamp(info.get('last_active', 0)).strftime('%Y-%m-%d %H:%M')}",
-             f"白名單：{'✅ 已授權' if in_wl else '❌ 未授權'}",
-             f"備註：{note}"]
+
+    lines = [f"{_escape_md('🌐 群組詳情：')}{title}\n",
+             f"{_escape_md('Chat ID')}：`{cid_int}`",
+             f"{_escape_md('類型')}：{grp_type}",
+             f"{_escape_md('成員')}：{members}",
+             f"{_escape_md('User/name')}：@{username}",
+             f"{_escape_md('首次發現')}：{first_seen}",
+             f"{_escape_md('最後活躍')}：{last_active}",
+             f"{_escape_md('白名單')}：{wl_status}",
+             f"{_escape_md('備註')}：{note}"]
     kb = [[InlineKeyboardButton("⬇️ 移出白名單" if in_wl else "⬆️ 加入白名單",
                                 callback_data=f"admin:regtoggle:{cid}")],
-          [InlineKeyboardButton("🔙 活動記錄", callback_data="admin:reg:0"),
-           InlineKeyboardButton("🔙 主面板", callback_data="admin:home")]]
+          [InlineKeyboardButton(_escape_md("🔙 活動記錄"), callback_data="admin:reg:0"),
+           InlineKeyboardButton(_escape_md("🔙 主面板"), callback_data="admin:home")]]
     await _panel_edit(q, context, "\n".join(lines), InlineKeyboardMarkup(kb))
 
 
@@ -468,11 +641,31 @@ async def panel_addchat_prompt(update: Update, context: ContextTypes.DEFAULT_TYP
     # 儲存等待狀態，讓下一個文字訊息被捕獲
     context.user_data["admin_waiting"] = "addchat"
     kb = [[InlineKeyboardButton("🔙 主面板", callback_data="admin:home")]]
+    add_text = (
+        f"✏️ 請輸入要授權的群組 *{_escape_md('Chat ID')}*（負數，例如 `{_escape_md('-1001234567890')}`）\n"
+        f"💡 或者：把群組裡的一條訊息*{_escape_md('轉發')}*到這個私聊，我會自動讀出該群組 ID，\n"
+        f"又或者：直接傳一條群組訊息連結（{_escape_md('t.me/groupname/123')}）"
+    )
     await _panel_edit(
         q, context,
-        "✏️ 請輸入要授權的群組 **Chat ID**（負數，例如 `-1001234567890`）\n"
-        "💡 或者：把群組裡的一條訊息**轉發**到這個私聊，我會自動讀出該群組 ID，\n"
-        "又或者：直接傳一條群組訊息連結（t.me/groupname/123）",
+        add_text,
+        InlineKeyboardMarkup(kb))
+
+
+async def panel_adduser_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """提示用戶輸入要授權的 Telegram 用戶 ID（正數）"""
+    q = update.callback_query
+    await q.answer()
+    context.user_data["admin_waiting"] = "adduser"
+    kb = [[InlineKeyboardButton("🔙 主面板", callback_data="admin:home")]]
+    add_text = (
+        f"✏️ 請輸入要授權的 *{_escape_md('用戶 ID')}*（正數，例如 `{_escape_md('123456789')}`）\n"
+        f"💡 用戶 ID 是對方在 Telegram 的數字 ID（不是用戶名）。\n"
+        f"授權後，即使 Bot 處於 *{_escape_md('白名單模式')}*，該用戶也能在私聊直接使用 Bot。"
+    )
+    await _panel_edit(
+        q, context,
+        add_text,
         InlineKeyboardMarkup(kb))
 
 
@@ -484,36 +677,43 @@ async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     mode = context.user_data.pop("admin_waiting", None)
     msg = update.message
+    # DEBUG: dump what we received
+    if msg:
+        log.info("HANDLE_ADMIN_INPUT mode=%s msg keys: text=%s sticker=%s photo=%s forward_origin=%s forward_from_chat=%s voice=%s doc=%s",
+                 mode, bool(msg.text), bool(msg.sticker), bool(msg.photo),
+                 bool(getattr(msg, 'forward_origin', None)),
+                 bool(getattr(msg, 'forward_from_chat', None)),
+                 bool(msg.voice), bool(msg.document))
+    else:
+        log.info("HANDLE_ADMIN_INPUT no msg object: %s", update)
+    # 用戶授權模式：解析正數 user_id
+    if mode == "adduser":
+        await _handle_adduser_input(update, context, msg)
+        return
 
     cid = None
     title = ""
-    
-    # 1. 嘗試從 forward_origin 獲取（支援所有類型：Channel、Chat、User、HiddenUser）
-    if msg.forward_origin:
+    if getattr(msg, "forward_origin", None):
+        # python-telegram-bot v22: 轉發來源統一喺 forward_origin
+        # MessageOriginChannel -> .chat (Channel)
+        # MessageOriginChat     -> .sender_chat (Chat)
+        # MessageOriginUser     -> 私人轉發，無群組 ID
         fo = msg.forward_origin
-        # MessageOriginChannel / MessageOriginChat
-        if hasattr(fo, 'chat') and fo.chat and hasattr(fo.chat, 'id'):
+        fo_type = getattr(fo, "type", None)
+        if fo_type == "channel" and getattr(fo, "chat", None):
             cid = fo.chat.id
-            title = getattr(fo.chat, 'title', '') or getattr(fo.chat, 'username', '') or ''
-        # MessageOriginChannel 可能有 chat_id 直接屬性
-        elif getattr(fo, 'chat_id', None) is not None:
-            cid = fo.chat_id
-            title = getattr(fo, 'chat_name', '') or ''
-        # MessageOriginChat / MessageOriginUser 可能有 sender_chat
-        elif getattr(fo, 'sender_chat_id', None) is not None:
-            cid = fo.sender_chat_id
-            title = getattr(fo, 'sender_chat_name', '') or ''
-        # MessageOriginUser / HiddenUser - 私人轉發無群組 ID
-        elif getattr(fo, 'sender_user', None) is not None:
-            pass  # 私人轉發，忽略
-    # 2. 兼容舊版 forward_from_chat
-    elif msg.forward_from_chat:
+            title = getattr(fo.chat, "title", "") or ""
+        elif fo_type == "chat" and getattr(fo, "sender_chat", None):
+            cid = fo.sender_chat.id
+            title = getattr(fo.sender_chat, "title", "") or ""
+        # HiddenUser / User 轉發忽略（私人轉發無群組 ID）
+    elif getattr(msg, "forward_from_chat", None):
+        # 極舊版兼容（v22 已移除，僅防禦）
         cid = msg.forward_from_chat.id
         title = msg.forward_from_chat.title or ""
-    # 3. 文字解析：純數字 chat_id 或 t.me 連結
     elif msg.text:
         txt = msg.text.strip()
-        m = re.search(r"-?\d{5,}", txt)
+        m = re.search(r"-?\d{5,}", txt)   # 任意負/正長數字
         if m:
             cid = int(m.group(0))
         else:
@@ -529,7 +729,7 @@ async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     return
 
     if cid is None:
-        await msg.reply_text("❌ 無法解析群組 ID，請用 /panel 再試，或直接發送數字的 chat_id / 轉發群組消息")
+        await msg.reply_text("❌ 無法解析群組 ID，請用 /panel 再試，或直接發送數字的 chat_id")
         return
 
     if cid >= 0:
@@ -543,16 +743,46 @@ async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if cid not in wl["chats"]:
         wl["chats"].append(cid)
         wl["chats_info"][str(cid)] = {
-            "note": title if title else f"manual {datetime.now().strftime('%m-%d')}",
+            "note": title if locals().get("title") else f"manual {datetime.now().strftime('%m-%d')}",
             "added_at": int(datetime.now().timestamp()),
         }
         save_whitelist(wl)
-    await msg.reply_text(f"✅ 已授權：`{cid}` ({_escape_md(title)})", parse_mode="MarkdownV2") if title else await msg.reply_text(f"✅ 已授權：`{cid}`", parse_mode="MarkdownV2")
+    await msg.reply_text(f"✅ 已授權：`{cid}`", parse_mode="MarkdownV2")
+
+
+async def _handle_adduser_input(update: Update, context: ContextTypes.DEFAULT_TYPE, msg):
+    """解析用戶輸入的 user_id 並加入白名單（授權用戶）"""
+    if not msg or not msg.text:
+        await (msg or update).reply_text(
+            "❌ 無法解析用戶 ID，請用 /panel → 👤 已授權用戶 → ➕ 添加用戶，再發送數字的 user_id")
+        return
+    txt = msg.text.strip()
+    m = re.search(r"\d{5,}", txt)
+    if not m:
+        await msg.reply_text(
+            "❌ 用戶 ID 必須係正數（例如 `123456789`）。請直接發送數字。",
+            parse_mode="MarkdownV2")
+        return
+    uid = int(m.group(0))
+    if uid <= 0:
+        await msg.reply_text("❌ 用戶 ID 必須係正數", parse_mode="MarkdownV2")
+        return
+    wl = load_whitelist()
+    if uid not in wl["users"]:
+        wl["users"].append(uid)
+        wl["users_info"][str(uid)] = {
+            "note": f"manual {datetime.now().strftime('%m-%d')}",
+            "added_at": int(datetime.now().timestamp()),
+        }
+        save_whitelist(wl)
+    await msg.reply_text(f"✅ 已授權用戶：`{uid}`", parse_mode="MarkdownV2")
 
 
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """面板回撥路由：admin:<action>:<value>"""
     q = update.callback_query
+    log.info("ADMIN_CALLBACK raw data=%s user=%s", q.data if q else None,
+             update.effective_user.id if update.effective_user else None)
     if not q or not q.data or not q.data.startswith("admin:"):
         return
     if not is_owner(update):
@@ -584,17 +814,29 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await panel_unuser(update, context, value)
         elif action == "addchat":
             await panel_addchat_prompt(update, context)
+        elif action == "adduser":
+            await panel_adduser_prompt(update, context)
+        elif action == "settings":
+            await panel_settings(update, context)
+        elif action == "tgl":
+            await panel_tgl_setting(update, context, value)
+        elif action == "tg2":
+            grp = parts[2] if len(parts) > 2 else ""
+            kind = parts[3] if len(parts) > 3 else ""
+            await panel_tgl_group(update, context, grp, kind)
+        elif action == "prob":
+            grp = parts[2] if len(parts) > 2 else ""
+            field = parts[3] if len(parts) > 3 else ""
+            direction = parts[4] if len(parts) > 4 else ""
+            await panel_prob_adjust(update, context, grp, field, direction)
+        elif action == "noop":
+            await q.answer()
         else:
             await panel_home(update, context)
     except Exception as e:
         log.exception("admin callback error: %s data=%s", e, q.data)
         try:
             await q.answer(f"❌ 出錯：{str(e)[:60]}", show_alert=True)
-        except Exception:
-            pass
-        # 發生錯誤時回到主面板
-        try:
-            await panel_home(update, context)
         except Exception:
             pass
 
@@ -611,13 +853,15 @@ async def panel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
           [InlineKeyboardButton("🌐 群組活動記錄", callback_data="admin:reg:0")],
           [InlineKeyboardButton("👤 已授權用戶", callback_data="admin:users:0")],
           [InlineKeyboardButton(("⛔ 開啟白名單" if not wl["enabled"]
-                                 else "✅ 關閉白名單"), callback_data="admin:toggle")]]
+                                 else "✅ 關閉白名單"), callback_data="admin:toggle")],
+          [InlineKeyboardButton(_escape_md("⚙️ 自動回覆設定"), callback_data="admin:settings")]]
     text = (f"🎛️ Bot 管理面板\n\n"
-            f"狀態：{status}\n"
-            f"授權群組：{len(wl['chats'])} 個\n"
-            f"授權用戶：{len(wl['users'])} 個\n"
-            f"活動群組：{len(reg)} 個")
-    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb))
+            f"狀態：{_escape_md(status)}\n"
+            f"授權群組：{_escape_md(str(len(wl['chats'])))} 個\n"
+            f"授權用戶：{_escape_md(str(len(wl['users'])))} 個\n"
+            f"活動群組：{_escape_md(str(len(reg)))} 個")
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb),
+                                    parse_mode="MarkdownV2", disable_web_page_preview=True)
 
 
 async def download_image(item):
@@ -907,7 +1151,7 @@ async def ans_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_msg = f"用戶問題：{question[:500]}"
         user_msg += "\n請用最多30字回應。"
 
-        raw = await _chat_complete(context, system_prompt, user_msg, max_tokens=100)
+        raw = await _chat_complete_fast(context, system_prompt, user_msg, max_tokens=80, timeout=12)
         answer = (raw.strip() or "（冇答案，試多次）")[:60]
         await status.edit_text(answer)
     except Exception as e:
@@ -1758,16 +2002,31 @@ CHAT_TOPICS = [
 
 
 async def _auto_answer(update: Update, context: ContextTypes.DEFAULT_TYPE,
-                       target_text: str, sticker_prob: float = 0.2):
-    """群组自动回复。sticker_prob=貼圖機率，其餘發 LLM 文字（本函數一定有回應）"""
+                       target_text: str, sticker_prob: float = None,
+                       mode: str = "random"):
+    """群组自动回复。
+    mode = tag / question / random，決定用邊組嘅 text_on / sticker_on 開關。
+    全局 auto_text / auto_sticker 係總開關（全關就全停）。
+    sticker_prob 可覆蓋（預設讀該組 sticker_pct）。"""
+    grp = SETTINGS.get(mode, SETTINGS["random"])
+    # 總開關 AND 該組開關
+    text_on = SETTINGS["auto_text"] and grp.get("text_on", True)
+    sticker_on = SETTINGS["auto_sticker"] and grp.get("sticker_on", True)
+    use_pool = FAST_POOL if mode == "tag" else None
+    use_timeout = 12 if mode == "tag" else 25
+    if not text_on and not sticker_on:
+        return
+    if sticker_prob is None:
+        sticker_prob = grp.get("sticker_pct", 20) / 100.0
     try:
-        if STICKER_FILE_IDS and random.random() < sticker_prob:
+        # 先決定貼圖定文字（單一 r 分段，唔疊加 gate）
+        if sticker_on and STICKER_FILE_IDS and random.random() < sticker_prob:
             sticker_id = random.choice(STICKER_FILE_IDS)
             await context.bot.send_sticker(chat_id=update.message.chat_id,
                                             sticker=sticker_id)
             return
-
-        topic = random.choice(CHAT_TOPICS)
+        if text_on:
+            topic = random.choice(CHAT_TOPICS)
         system_prompt = (
             "你是一个在群里吹水的人，语气自然、随意。"
             "你用简体中文普通话（混合书面语）回应，别像 AI、别客套、别开场白。"
@@ -1776,20 +2035,23 @@ async def _auto_answer(update: Update, context: ContextTypes.DEFAULT_TYPE,
             "严禁：说自己是 AI、机器人、语言模型；礼貌客套话；标准客服语气；输出英文单词"
         )
         user_msg = f"群里有人说：「{target_text[:500]}」\n你作为一个在场吹水的人，自然回应一句（20-50字）。"
-        raw = await _chat_complete(context, system_prompt, user_msg, max_tokens=150)
+        if mode == "tag":
+            raw = await _chat_complete_fast(context, system_prompt, user_msg, max_tokens=80, timeout=12)
+        else:
+            raw = await _chat_complete(context, system_prompt, user_msg, max_tokens=150)
         answer = (raw.strip() or "（没答案）")[:80]
         await context.bot.send_message(chat_id=update.message.chat_id,
                                         text=answer)
     except Exception as e:
         log.exception("auto_answer failed")
-        # LLM 全掛 fallback：發貼圖代替，保證有反應
-        try:
-            if STICKER_FILE_IDS:
+        # LLM 全掛 fallback：只有 auto_sticker 開才發貼圖代替
+        if SETTINGS["auto_sticker"] and STICKER_FILE_IDS:
+            try:
                 await context.bot.send_sticker(
                     chat_id=update.message.chat_id,
                     sticker=random.choice(STICKER_FILE_IDS))
-        except Exception:
-            log.exception("sticker fallback also failed")
+            except Exception:
+                log.exception("sticker fallback also failed")
 
 
 async def auto_msg_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1825,21 +2087,36 @@ async def auto_msg_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = msg.text.strip()
     bot_username = (context.bot.username or "").lstrip("@")
+    tag_s = SETTINGS["tag"]
+    q_s = SETTINGS["question"]
+    rnd_s = SETTINGS["random"]
+    tag_trigger = tag_s["trigger_pct"] / 100.0
+    tag_sticker = tag_s["sticker_pct"] / 100.0
+    q_trigger = q_s["trigger_pct"] / 100.0
+    q_sticker = q_s["sticker_pct"] / 100.0
+    random_trigger = rnd_s["trigger_pct"] / 100.0
+    random_sticker = rnd_s["sticker_pct"] / 100.0
 
-    # ① Tag bot 回覆（100% 回應：20% 貼圖 / 80% 文字）
-    if bot_username and re.search(r'@' + re.escape(bot_username) + r'\b', text):
-        user_part = re.sub(r'@' + re.escape(bot_username) + r'\s*', '', text).strip()
-        await _auto_answer(update, context, user_part or "hi", sticker_prob=0.2)
+    is_tag = bool(bot_username and re.search(r'@' + re.escape(bot_username) + r'\b', text))
+    is_q = bool(QUESTION_PATTERN.search(text))
+    can = SETTINGS["auto_text"] or SETTINGS["auto_sticker"]
+
+    # ① @bot 主動觸發（獨立組 tag，含 text_on/sticker_on 開關）
+    if is_tag and can:
+        if random.random() < tag_trigger:
+            user_part = re.sub(r'@' + re.escape(bot_username) + r'\s*', '', text).strip() or "hi"
+            await _auto_answer(update, context, user_part, sticker_prob=tag_sticker, mode="tag")
         return
 
-    # ② 問題關鍵字觸發（3% 回應：20% 貼圖 / 80% 文字）
-    if QUESTION_PATTERN.search(text) and random.random() < 0.03:
-        await _auto_answer(update, context, text, sticker_prob=0.2)
+    # ② 問題關鍵字觸發（獨立組 question）
+    if is_q and can:
+        if random.random() < q_trigger:
+            await _auto_answer(update, context, text, sticker_prob=q_sticker, mode="question")
         return
 
-    # ③ 路人隨機回覆（3% 機率會回；回時 70% 貼圖 / 30% 文字）
-    if random.random() < 0.03:
-        await _auto_answer(update, context, text, sticker_prob=0.7)
+    # ③ 路人隨機（獨立組 random）
+    if can and random.random() < random_trigger:
+        await _auto_answer(update, context, text, sticker_prob=random_sticker, mode="random")
 
 
 async def sticker_msg_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1855,17 +2132,22 @@ async def sticker_msg_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     h.append({"name": name, "text": "[贴图]", "ts": int(msg.date.timestamp())})
     if len(h) > CHAT_HISTORY_MAX:
         del h[: len(h) - CHAT_HISTORY_MAX]
-    # 15% 回貼圖（唔用自己個 file_id，用對方發嘅，似真人互動）
+    # 人發貼圖 → 受 random 組開關控制（15% 回貼圖 / 20% 回文字 / 65% 唔理）
+    rnd = SETTINGS["random"]
+    text_on = SETTINGS["auto_text"] and rnd.get("text_on", True)
+    sticker_on = SETTINGS["auto_sticker"] and rnd.get("sticker_on", True)
+    if not text_on and not sticker_on:
+        return
     r = random.random()
-    if r < 0.15:
+    if sticker_on and r < 0.15:
         try:
             await context.bot.send_sticker(chat_id=msg.chat_id,
                                             sticker=msg.sticker.file_id)
         except Exception:
             log.exception("sticker reply failed")
-    elif r < 0.35:
-        # 20% 回文字（走 _auto_answer，sticker_prob=0 保證唔再發貼圖）
-        await _auto_answer(update, context, "發貼圖", sticker_prob=0.0)
+    elif text_on and r < 0.35:
+        # 20% 回文字（sticker_prob=0 保證唔再發貼圖）
+        await _auto_answer(update, context, "發貼圖", sticker_prob=0.0, mode="random")
     # else 65% 唔理
 
 
@@ -1890,8 +2172,14 @@ async def chatter_loop(context: ContextTypes.DEFAULT_TYPE):
         chat_id = random.choice(group_ids)
         if in_window():
             try:
-                # 機率分布：3% 貼圖 / 97% LLM 文字（由 20% 貼圖改為 3%） 
-                if STICKER_FILE_IDS and random.random() < 0.03:
+                # 機率分布受 settings 控制（random 組）
+                chatter_sticker = SETTINGS["random"]["sticker_pct"] / 100.0
+                text_on = SETTINGS["auto_text"] and SETTINGS["random"].get("text_on", True)
+                sticker_on = SETTINGS["auto_sticker"] and SETTINGS["random"].get("sticker_on", True)
+                if not text_on and not sticker_on:
+                    await asyncio.sleep(INTERVAL)
+                    continue
+                if sticker_on and STICKER_FILE_IDS and random.random() < chatter_sticker:
                     sticker_id = random.choice(STICKER_FILE_IDS)
                     await context.bot.send_sticker(chat_id=chat_id,
                                                     sticker=sticker_id)
@@ -1936,13 +2224,9 @@ async def chatter_bootstrap(update: Update, context: ContextTypes.DEFAULT_TYPE):
     asyncio.create_task(chatter_loop(context))
 
 
-async def _record_group_early(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """最早執行的 handler：記錄所有群組活動到註冊表（命令、媒體、貼圖、轉發全部涵蓋）"""
-    await register_group(update, context)
-
-
 async def _record_and_chatter(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """最後一個 ALL handler：確保所有群組消息都被記錄到註冊表（備用雙重保障）"""
+    """最後一個 ALL handler：確保所有群組消息都被記錄到註冊表"""
+    # 記錄群組到註冊表（命令、媒體、貼圖、轉發全部涵蓋）
     await register_group(update, context)
 
 
@@ -1988,6 +2272,7 @@ def main():
     # 開並行後每個 update 獨立 task，非 AI 功能即時回應。
     # Timeout：PTB 預設 media write timeout=20s，上傳 10MB+ 音頻會 TimedOut，
     # 放寬媒體上傳到 300s；pool 都有 30s 等位，並行時唔會池排隊超時。
+    global application
     app = (ApplicationBuilder().token(TELEGRAM_BOT_TOKEN)
            .concurrent_updates(True)
            .read_timeout(60).write_timeout(120)
@@ -1995,8 +2280,6 @@ def main():
            .connect_timeout(15).pool_timeout(30)
            .post_init(_set_bot_commands)
            .build())
-    # 最早記錄群組（最優先，在所有 auth/check 之前）
-    app.add_handler(MessageHandler(filters.ALL, _record_group_early))
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("panel", panel_command))
     app.add_handler(CommandHandler("draw", require_auth(draw_command)))
@@ -2019,11 +2302,24 @@ def main():
     app.add_handler(CommandHandler("J", require_auth(jable_search_command)))
     app.add_handler(CallbackQueryHandler(song_callback, pattern="^song:"))
     app.add_handler(CallbackQueryHandler(video_callback, pattern="^vid:"))
+    # TEMP DEBUG: catch-all at group -1 to confirm live dispatch reaches group messages
+    # _dbg_gm1 removed for test
     app.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin:"))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, auto_msg_handler))
+    # 專門捕獲 admin_waiting 狀態下嘅任何消息（文字/轉發/貼圖/相），優先於 auto_msg_handler
+    async def _admin_waiting_capture(update, context):
+        if context.user_data.get("admin_waiting"):
+            await handle_admin_input(update, context)
+    app.add_handler(MessageHandler(filters.ALL, _admin_waiting_capture), group=-1)
+    async def _ptb_error(update, context):
+        log.exception("PTB unhandled error: update=%s", update.update_id if update else None)
+    app.add_error_handler(_ptb_error)
+
+    app.add_handler(MessageHandler(filters.ALL, auto_msg_handler))
     app.add_handler(MessageHandler(filters.Sticker.ALL & ~filters.FORWARDED, sticker_msg_handler))
-    # 最後一個 ALL handler：雙重保障記錄群組
+    # 最後一個 ALL handler：記錄所有群組消息到註冊表（命令、媒體、貼圖都會記錄）
     app.add_handler(MessageHandler(filters.ALL, _record_and_chatter))
+    global application
+    application = app
     log.info("Draw bot started")
     app.run_polling()
 
