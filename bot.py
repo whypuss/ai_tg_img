@@ -219,7 +219,16 @@ def is_authorized(update: Update) -> bool:
         return True
     chat_id = update.effective_chat.id if update.effective_chat else 0
     user_id = update.effective_user.id if update.effective_user else 0
-    return chat_id in wl["chats"] or user_id in wl["users"]
+    # 防禦：歷史 whitelist.json 可能混有 str/int，統一轉 int 集合比對
+    try:
+        chats_set = set(int(x) for x in wl.get("chats", []))
+    except Exception:
+        chats_set = set(wl.get("chats", []))
+    try:
+        users_set = set(int(x) for x in wl.get("users", []))
+    except Exception:
+        users_set = set(wl.get("users", []))
+    return chat_id in chats_set or user_id in users_set
 
 
 async def register_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -983,7 +992,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Google 搜索：/G <關鍵詞>\n"
             "搜圖片：/P <關鍵詞>\n"
             "搜影片（播放）：/V <關鍵詞>\n"
-            "搜 JAV：/M <番號/關鍵詞> 或 /J（Jable 直播源）\n"
+            "搜 JAV：/J <番號/關鍵詞>（Jable 直播源）\n"
             "搜 Telegram 群組：/find <關鍵字>\n"
             "朗讀：/say（普通話）/sayc（粵語）<文字>")
     # 擁有者私聊：底部加面板按鈕
@@ -1024,9 +1033,13 @@ async def record_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message or update.edited_message
     if not msg or not msg.text or msg.text.startswith("/"):
         return
-    name = msg.from_user.full_name if msg.from_user else "?"
+    fu = msg.from_user
+    name = fu.full_name if fu else "?"
+    username = (fu.username or "") if fu else ""
+    uid = fu.id if fu else None
     h = chat_hist(context, msg.chat_id)
-    h.append({"name": name, "text": msg.text[:1000], "ts": int(msg.date.timestamp())})
+    h.append({"name": name, "username": username, "uid": uid,
+              "text": msg.text[:1000], "ts": int(msg.date.timestamp())})
     if len(h) > CHAT_HISTORY_MAX:
         del h[: len(h) - CHAT_HISTORY_MAX]
     if len(h) % 10 == 0:
@@ -1068,6 +1081,65 @@ async def sum_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                disable_web_page_preview=True)
     except Exception as e:
         log.exception("sum failed")
+        await status.edit_text(f"❌ 總結失敗：{str(e)[:400]}")
+
+
+async def love_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """總結兩位成員喺群組入面嘅對話：/love @用戶1 @用戶2"""
+    args = [a.lstrip("@") for a in context.args if a.strip()]
+    if len(args) < 2:
+        await update.message.reply_text(
+            "用法：/love @用戶1 @用戶2\n"
+            "總結呢個群組入面呢兩個人嘅對話內容（需要 Bot 有記錄到佢哋嘅發言）。")
+        return
+    q1, q2 = args[0].lower(), args[1].lower()
+    hist = chat_hist(context, update.effective_chat.id)
+    if not hist:
+        await update.message.reply_text(
+            "暫時冇聊天記錄可以總結。\n"
+            "（Bot 要喺 @BotFather 關閉 Group Privacy 先能記錄群組訊息）")
+        return
+
+    def _is_match(e, q):
+        uname = (e.get("username") or "").lower()
+        nm = (e.get("name") or "").lower()
+        uid = str(e.get("uid") or "")
+        return q == uname or q == nm or q == uid
+
+    filtered = [e for e in hist if _is_match(e, q1) or _is_match(e, q2)]
+    if not filtered:
+        await update.message.reply_text(
+            f"搵唔到 @{args[0]} 或 @{args[1]} 嘅發言記錄，可能 Bot 未記錄到，或者名稱唔匹配。")
+        return
+
+    CAP = 250
+    truncated = len(filtered) > CAP
+    if truncated:
+        filtered = filtered[-CAP:]
+
+    label1 = next((e.get("username") or e.get("name") for e in filtered if _is_match(e, q1)), args[0])
+    label2 = next((e.get("username") or e.get("name") for e in filtered if _is_match(e, q2)), args[1])
+
+    note = f"（只取最近 {CAP} 句）" if truncated else ""
+    status = await update.message.reply_text(f"💞 總結 @{label1} 同 @{label2} 嘅對話（共 {len(filtered)} 句）{note}…")
+    try:
+        transcript = chr(10).join(f"[{e.get('name','?')}] {e['text']}" for e in filtered)
+        system_prompt = (
+            "你是一個對話與互動分析助手。以下是某群組中兩位成員之間的對話記錄"
+            f"（已過濾，只保留 @{label1} 與 @{label2} 兩人的發言）。請用繁體中文書面語輸出結構化總結：\n"
+            "1. 💬 主要話題：他們討論了哪些主題，按主題分點並附具體細節\n"
+            "2. 🔄 互動模式：誰較主動、語氣如何、有無共識或分歧、互動氛圍\n"
+            "3. 📌 重要事件或決定：對話中提及的重要事項\n"
+            "4. ✨ 其他值得留意的細節\n"
+            "要求：每點至少兩句具體描述，保留人名與細節，避免模糊；總長約 500 字。")
+        raw = await _chat_complete(context, system_prompt,
+                                   f"請總結以下 @{label1} 與 @{label2} 的對話記錄：\n\n{transcript}",
+                                   max_tokens=2000)
+        summary = (raw or "").strip() or "（模型冇返回內容，試多次或者減少記錄條數）"
+        await status.edit_text(f"💞 @{label1} × @{label2} 對話總結（{len(filtered)} 句）\n\n{summary[:4000]}",
+                               disable_web_page_preview=True)
+    except Exception as e:
+        log.exception("love failed")
         await status.edit_text(f"❌ 總結失敗：{str(e)[:400]}")
 
 
@@ -1141,7 +1213,7 @@ async def ans_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = await update.message.reply_text("思考中…")
     try:
         system_prompt = ("你是一個聊天群組助手。用繁體中文書面語回答，"
-                         "嚴格限制在30字以內，直接給答案，不要客套、不要開場白、不要展開。")
+                         "控制在60字以內，可帶1-2句簡短補充說明，直接給答案，不要客套話。")
         if reply and (reply.text or "").strip():
             target = (reply.text or "").strip()
             user_msg = f"有人喺群組講咗：「{target[:500]}」"
@@ -1149,10 +1221,10 @@ async def ans_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user_msg += f"\n用戶想知：{question[:200]}"
         else:
             user_msg = f"用戶問題：{question[:500]}"
-        user_msg += "\n請用最多30字回應。"
+        user_msg += "\n請用60字以內回應，可補充1-2句。"
 
-        raw = await _chat_complete_fast(context, system_prompt, user_msg, max_tokens=80, timeout=12)
-        answer = (raw.strip() or "（冇答案，試多次）")[:60]
+        raw = await _chat_complete_fast(context, system_prompt, user_msg, max_tokens=150, timeout=12)
+        answer = (raw.strip() or "（冇答案，試多次）")[:120]
         await status.edit_text(answer)
     except Exception as e:
         log.exception("ans failed")
@@ -1370,7 +1442,7 @@ async def google_search_command(update: Update, context: ContextTypes.DEFAULT_TY
 
     status = await update.message.reply_text(f"🔍 搜尋「{query}」…")
     try:
-        async with httpx.AsyncClient(timeout=20) as hc:
+        async with httpx.AsyncClient(timeout=8) as hc:
             # 不指定 engines，讓 SearXNG 自動用可用的（避免 google/bing 被 CAPTCHA 擋）
             params = {"q": query, "format": "json", "categories": "general", "safesearch": 0}
             r = await hc.get(SEARXNG_URL, params=params)
@@ -1395,7 +1467,7 @@ async def google_search_command(update: Update, context: ContextTypes.DEFAULT_TY
         lines.append(f"{i}. [{title}]({url})\n   {snippet}…\n   🔧 {', '.join(engines) if engines else '未知'}")
 
     text = "\n".join(lines) + "\n\n💡 結果來自 SearXNG 可用引擎"
-    await status.edit_text(text, parse_mode="MarkdownV2", disable_web_page_preview=True)
+    await status.edit_text(text, disable_web_page_preview=True)
 
 
 # ================= 圖片搜索 /P =================
@@ -1824,6 +1896,8 @@ async def _fetch_goodav(query: str) -> list:
         if not code:
             m = re.search(r'/html/(\d+)', url)
             code = m.group(1) if m else ""
+        if not url.startswith("http"):
+            url = "https://goodav17.com" + url
         results.append({
             "id": code,
             "title": title.strip(),
@@ -1894,8 +1968,8 @@ async def jav_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # 相簿發送成功後，額外發一條可點擊嘅連結列表
     link_lines = [f"🔗 JAVDB 連結（{query}）："]
     for item in results[:len(media)]:
-        link_lines.append(f"• [{item['code']} - {item['title'][:50]}]({item['url']})")
-    await update.message.reply_text("\n".join(link_lines), parse_mode="MarkdownV2",
+        link_lines.append(f"• {item['code']} - {item['title'][:50]}\n  {item['url']}")
+    await update.message.reply_text("\n".join(link_lines),
                                      disable_web_page_preview=True)
 
 
@@ -1958,8 +2032,8 @@ async def jable_search_command(update: Update, context: ContextTypes.DEFAULT_TYP
     # 相簿後發可點擊連結
     link_lines = [f"🔗 正妹AV 連結（{query}）："]
     for item in results[:len(media)]:
-        link_lines.append(f"• [{item['code']} - {item['title'][:50]}]({item['url']})")
-    await update.message.reply_text("\n".join(link_lines), parse_mode="MarkdownV2",
+        link_lines.append(f"• {item['code']} - {item['title'][:50]}\n  {item['url']}")
+    await update.message.reply_text("\n".join(link_lines),
                                      disable_web_page_preview=True)
 
 
@@ -2068,9 +2142,13 @@ async def auto_msg_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 記錄群組到註冊表（已由 pre_update_handler 處理，此處不再重複）
 
     # 記錄聊天
-    name = msg.from_user.full_name if msg.from_user else "?"
+    fu = msg.from_user
+    name = fu.full_name if fu else "?"
+    username = (fu.username or "") if fu else ""
+    uid = fu.id if fu else None
     h = chat_hist(context, msg.chat_id)
-    h.append({"name": name, "text": msg.text[:1000], "ts": int(msg.date.timestamp())})
+    h.append({"name": name, "username": username, "uid": uid,
+              "text": msg.text[:1000], "ts": int(msg.date.timestamp())})
     if len(h) > CHAT_HISTORY_MAX:
         del h[: len(h) - CHAT_HISTORY_MAX]
     if len(h) % 10 == 0:
@@ -2240,13 +2318,13 @@ async def _set_bot_commands(app):
         BotCommand("draw", "AI 生圖"),
         BotCommand("redraw", "圖生圖（回覆圖片）"),
         BotCommand("sum", "總結聊天記錄"),
+        BotCommand("love", "總結兩人對話"),
         BotCommand("ans", "問問題"),
         BotCommand("sing", "搜歌"),
         BotCommand("find", "搜 TG 群組"),
         BotCommand("g", "Google 搜索"),
         BotCommand("p", "搜圖片"),
         BotCommand("v", "搜影片"),
-        BotCommand("m", "搜 JAV (JAVDB)"),
         BotCommand("j", "搜 JAV (Jable 直播源)"),
         BotCommand("say", "朗讀（普通話）"),
         BotCommand("sayc", "朗讀（粵語）"),
@@ -2285,6 +2363,7 @@ def main():
     app.add_handler(CommandHandler("draw", require_auth(draw_command)))
     app.add_handler(CommandHandler("redraw", require_auth(redraw_command)))
     app.add_handler(CommandHandler("sum", require_auth(sum_command)))
+    app.add_handler(CommandHandler("love", require_auth(love_command)))
     app.add_handler(CommandHandler("say", require_auth(say_command)))
     app.add_handler(CommandHandler("sayc", require_auth(sayc_command)))
     app.add_handler(CommandHandler("ans", require_auth(ans_command)))
@@ -2296,8 +2375,6 @@ def main():
     app.add_handler(CommandHandler("P", require_auth(image_search_command)))
     app.add_handler(CommandHandler("v", require_auth(video_search_command)))
     app.add_handler(CommandHandler("V", require_auth(video_search_command)))
-    app.add_handler(CommandHandler("m", require_auth(jav_search_command)))
-    app.add_handler(CommandHandler("M", require_auth(jav_search_command)))
     app.add_handler(CommandHandler("j", require_auth(jable_search_command)))
     app.add_handler(CommandHandler("J", require_auth(jable_search_command)))
     app.add_handler(CallbackQueryHandler(song_callback, pattern="^song:"))
