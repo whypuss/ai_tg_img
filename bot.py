@@ -72,9 +72,16 @@ async def _chat_complete(context: ContextTypes.DEFAULT_TYPE,
                               {"role": "user", "content": user_msg}],
                     max_tokens=max_tokens),
                 timeout=timeout)
-            raw = resp.choices[0].message.content
-            if raw and raw.strip():
-                return raw.strip()
+            msg = resp.choices[0].message
+            raw = getattr(msg, "content", None) or (msg.get("content") if isinstance(msg, dict) else None)
+            if not raw or not str(raw).strip():
+                raw = getattr(msg, "reasoning_content", None) or (msg.get("reasoning_content") if isinstance(msg, dict) else None) or ""
+                if not raw or not str(raw).strip():
+                    psf = getattr(msg, "provider_specific_fields", None) or (msg.get("provider_specific_fields") if isinstance(msg, dict) else None)
+                    if isinstance(psf, dict):
+                        raw = psf.get("reasoning") or psf.get("reasoning_content") or raw
+            if raw and str(raw).strip():
+                return str(raw).strip()
             errors.append(f"{label}: empty response")
         except Exception as e:
             log.warning("pool skip %s: %s", label, e)
@@ -90,9 +97,18 @@ async def _chat_complete_fast(context, system_prompt, user_msg, max_tokens=80, t
             resp = await _asyncio.wait_for(
                 c.chat.completions.create(model=model, messages=[{"role":"system","content":system_prompt},{"role":"user","content":user_msg}], max_tokens=max_tokens),
                 timeout=timeout)
-            raw = resp.choices[0].message.content
-            if raw and raw.strip():
-                return raw.strip()
+            msg = resp.choices[0].message
+            raw = getattr(msg, "content", None) or (msg.get("content") if isinstance(msg, dict) else None)
+            # litellm/gmi 有時把正文放 reasoning_content 而 content=null
+            if not raw or not str(raw).strip():
+                raw = getattr(msg, "reasoning_content", None) or (msg.get("reasoning_content") if isinstance(msg, dict) else None) or ""
+                # 再嘗試 provider_specific_fields
+                if not raw or not str(raw).strip():
+                    psf = getattr(msg, "provider_specific_fields", None) or (msg.get("provider_specific_fields") if isinstance(msg, dict) else None)
+                    if isinstance(psf, dict):
+                        raw = psf.get("reasoning") or psf.get("reasoning_content") or raw
+            if raw and str(raw).strip():
+                return str(raw).strip()
             raise RuntimeError(f"{label}: empty")
         except Exception as e:
             raise RuntimeError(f"{label}: {e}")
@@ -1223,7 +1239,11 @@ async def ans_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_msg = f"用戶問題：{question[:500]}"
         user_msg += "\n請用60字以內回應，可補充1-2句。"
 
-        raw = await _chat_complete_fast(context, system_prompt, user_msg, max_tokens=150, timeout=12)
+        try:
+            raw = await _chat_complete_fast(context, system_prompt, user_msg, max_tokens=150, timeout=12)
+        except Exception as e:
+            log.warning("ans fast pool failed, fallback to direct pool: %s", e)
+            raw = await _chat_complete(context, system_prompt, user_msg, max_tokens=150)
         answer = (raw.strip() or "（冇答案，試多次）")[:120]
         await status.edit_text(answer)
     except Exception as e:
@@ -2110,7 +2130,11 @@ async def _auto_answer(update: Update, context: ContextTypes.DEFAULT_TYPE,
         )
         user_msg = f"群里有人说：「{target_text[:500]}」\n你作为一个在场吹水的人，自然回应一句（20-50字）。"
         if mode == "tag":
-            raw = await _chat_complete_fast(context, system_prompt, user_msg, max_tokens=80, timeout=12)
+            try:
+                raw = await _chat_complete_fast(context, system_prompt, user_msg, max_tokens=80, timeout=12)
+            except Exception as e:
+                log.warning("tag fast failed fallback: %s", e)
+                raw = await _chat_complete(context, system_prompt, user_msg, max_tokens=80)
         else:
             raw = await _chat_complete(context, system_prompt, user_msg, max_tokens=150)
         answer = (raw.strip() or "（没答案）")[:80]
