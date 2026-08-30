@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Telegram /draw bot — SenseNova sensenova-u1-fast 生圖"""
+"""Telegram /draws bot — SenseNova sensenova-u1-fast 生圖"""
 import asyncio
 import base64
 import io
@@ -900,7 +900,7 @@ async def draw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prompt, size = parse_args(list(context.args))
     if not prompt:
         await update.message.reply_text(
-            "用法：/draw <描述> [比例]\n例如：/draw 16:9 一隻賽博朋克風格嘅貓\n"
+            "用法：/draws <描述> [比例]\n例如：/draws 16:9 一隻賽博朋克風格嘅貓\n"
             f"支持比例：{' '.join(SIZES)}")
         return
 
@@ -984,7 +984,7 @@ async def redraw_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = ("Hi！用 /draw <描述> 生圖 🎨\n"
+    text = ("Hi！用 /draws <描述> 生圖 🎨\n"
             "圖生圖：回覆一張圖 + /redraw <想點改>\n"
             "總結聊天記錄：/sum [條數，預設200]\n"
             "問答：/ans <問題>\n"
@@ -2315,7 +2315,7 @@ async def _set_bot_commands(app):
     # 所有人可見的指令（名稱必須全小寫、字母數字下劃線）
     public_cmds = [
         BotCommand("start", "使用說明"),
-        BotCommand("draw", "AI 生圖"),
+        BotCommand("draws", "AI 生圖"),
         BotCommand("redraw", "圖生圖（回覆圖片）"),
         BotCommand("sum", "總結聊天記錄"),
         BotCommand("love", "總結兩人對話"),
@@ -2360,7 +2360,7 @@ def main():
            .build())
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("panel", panel_command))
-    app.add_handler(CommandHandler("draw", require_auth(draw_command)))
+    app.add_handler(CommandHandler("draws", require_auth(draw_command)))
     app.add_handler(CommandHandler("redraw", require_auth(redraw_command)))
     app.add_handler(CommandHandler("sum", require_auth(sum_command)))
     app.add_handler(CommandHandler("love", require_auth(love_command)))
