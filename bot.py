@@ -120,7 +120,7 @@ log = logging.getLogger("drawbot")
 
 client = AsyncOpenAI(api_key=SENSENOVA_API_KEY, base_url=SENSENOVA_BASE_URL)
 LITELLM_API_KEY = os.environ.get("LITELLM_API_KEY", "")  # 在 Maxwell .env 設 LITELLM_API_KEY
-LITELLM_BASE_URL = os.environ.get("LITELLM_BASE_URL", "http://192.168.31.55:4002/v1")
+LITELLM_BASE_URL = os.environ.get("LITELLM_BASE_URL", "http://127.0.0.1:4002/v1")
 litellm_client = AsyncOpenAI(api_key=LITELLM_API_KEY, base_url=LITELLM_BASE_URL)
 
 # ================= 管理面板：白名單 & 群組註冊表 =================

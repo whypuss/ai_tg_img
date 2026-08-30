@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 
 DB_PATH = Path(__file__).parent / "telegram_index.db"
-SEARXNG_URL = "http://192.168.31.55:8889/search"
+SEARXNG_URL = os.getenv("SEARXNG_URL", "http://127.0.0.1:8889/search")
 TGSTAT_TOKEN = os.getenv("TGSTAT_TOKEN", "")  # 免費 API Search token
 TGSTAT_API_URL = "https://api.tgstat.ru"
 
