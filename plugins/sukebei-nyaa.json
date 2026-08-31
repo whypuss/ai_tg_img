@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "id": "sukebei-nyaa",
+  "name": "Sukebei Nyaa",
+  "enabled": true,
+  "baseUrl": "https://sukebei.nyaa.si",
+  "headers": {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+  },
+  "search": {
+    "method": "GET",
+    "url": "/?q={query}&p={page}",
+    "responseType": "html",
+    "pageSize": 75,
+    "itemPattern": "<a href=\"/view/(?<sourceItemId>[^\\\"]+)\"[^>]*>(?<title>[^<]+)</a>[\\s\\S]*?<a href=\"(?<magnet>magnet:[^\\\"]+)\"[\\s\\S]*?<td class=\"text-center\">(?<humanSize>[^<]+)</td>[\\s\\S]*?<td class=\"text-center\"[^>]*data-timestamp[^>]*>[^<]*</td>[\\s\\S]*?<td class=\"text-center\">(?<seeders>\\d+)</td>\\s*<td class=\"text-center\">(?<leechers>\\d+)</td>"
+  },
+  "detail": {
+    "method": "GET",
+    "url": "/view/{sourceItemId}",
+    "responseType": "html",
+    "itemPattern": "<a href=\"(?<magnet>magnet:[^\"]+)\"",
+    "fileRootPattern": "",
+    "filePattern": ""
+  },
+  "fields": {
+    "sourceItemId": "sourceItemId",
+    "title": "title",
+    "magnet": "magnet",
+    "humanSize": "humanSize",
+    "seeders": "seeders",
+    "leechers": "leechers"
+  },
+  "fileFields": {},
+  "defaults": {
+    "webUrl": "/view/{sourceItemId}"
+  }
+}

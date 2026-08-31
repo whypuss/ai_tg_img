@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "id": "tpb-apibay",
+  "name": "ThePirateBay (via apibay)",
+  "enabled": true,
+  "baseUrl": "https://apibay.org",
+  "headers": {
+    "User-Agent": "Mozilla/5.0",
+    "Accept": "application/json"
+  },
+  "search": {
+    "method": "GET",
+    "url": "/q.php?q={query}&cat=0",
+    "responseType": "json",
+    "itemsPath": "",
+    "pageSize": 100
+  },
+  "detail": {
+    "method": "GET",
+    "url": "/q.php?q={query}",
+    "responseType": "json",
+    "rootPath": "",
+    "filesPath": ""
+  },
+  "fields": {
+    "sourceItemId": "id",
+    "title": "name",
+    "infoHash": "info_hash",
+    "seeders": "seeders",
+    "leechers": "leechers",
+    "size": "size",
+    "humanSize": "size",
+    "createdAt": "added"
+  },
+  "fileFields": {},
+  "defaults": {
+    "magnet": "magnet:?xt=urn:btih:{infoHashLower}",
+    "webUrl": "https://thepiratebay.org/description.php?id={sourceItemId}"
+  }
+}

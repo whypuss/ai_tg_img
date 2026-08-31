@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "id": "gcbt",
+  "name": "GCBT 磁力",
+  "enabled": true,
+  "baseUrl": "https://gcbt.net",
+  "headers": {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+  },
+  "search": {
+    "method": "GET",
+    "url": "/search/{query}/page/{page}",
+    "responseType": "html",
+    "pageSize": 10,
+    "rootPattern": "<main class=\"site-main\">([\\s\\S]*?)</main>",
+    "itemPattern": "<h2 class=\"entry-title\"><a[^>]+href=https://gcbt\\.net/download/(?<sourceItemId>[^\"\\s>]+)[^>]*>(?<title>[^<]+)</a>"
+  },
+  "detail": {
+    "method": "GET",
+    "url": "/download/{sourceItemId}",
+    "responseType": "html",
+    "itemPattern": "<a href=\"(?<magnet>magnet:[^\"]+)\"",
+    "fileRootPattern": "",
+    "filePattern": ""
+  },
+  "fields": {
+    "sourceItemId": "sourceItemId",
+    "title": "title",
+    "magnet": "magnet"
+  },
+  "fileFields": {},
+  "defaults": {
+    "webUrl": "/download/{sourceItemId}"
+  }
+}
