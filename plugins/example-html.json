@@ -1,0 +1,47 @@
+{
+  "_comment": "示例 HTML 插件（來自 JAVBUS docs/example.json），需修改 baseUrl 為真實 BT 站",
+  "schemaVersion": 1,
+  "id": "example-html",
+  "name": "Example HTML Source (示例，需替換)",
+  "enabled": false,
+  "baseUrl": "https://example.com",
+  "headers": {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+  },
+  "search": {
+    "method": "GET",
+    "url": "/search?q={query}&page={page}",
+    "responseType": "html",
+    "pageSize": 20,
+    "rootPattern": "<div class=\"result-list\">([\\s\\S]*?)<nav class=\"pager\">",
+    "itemPattern": "<div class=\"item\">\\s*<a href=\"(?<sourceItemId>[^\"]+)\">(?<title>.*?)</a>\\s*<span class=\"hash\">(?<infoHash>[A-Fa-f0-9]{40})</span>\\s*<span class=\"size\">(?<humanSize>.*?)</span>\\s*<span class=\"seeders\">(?<seeders>\\d+)</span>\\s*</div>",
+    "totalPattern": "(\\d+)\\s+results",
+    "lastPagePattern": "page=(\\d+)\">Last"
+  },
+  "detail": {
+    "method": "GET",
+    "url": "{sourceItemId}",
+    "responseType": "html",
+    "itemPattern": "<h1[^>]*>(?<title>.*?)</h1>[\\s\\S]*?<a href=\"(?<magnet>magnet:\\?xt=urn:btih:(?<infoHash>[A-Fa-f0-9]{40})[^\"]*)\"",
+    "fileRootPattern": "<ul class=\"files\">([\\s\\S]*?)</ul>",
+    "filePattern": "<li>\\s*<span class=\"path\">(?<path>.*?)</span>\\s*<span class=\"size\">(?<humanSize>.*?)</span>\\s*</li>"
+  },
+  "fields": {
+    "sourceItemId": "sourceItemId",
+    "title": "title",
+    "infoHash": "infoHash",
+    "magnet": "magnet",
+    "humanSize": "humanSize",
+    "seeders": "seeders",
+    "webUrl": "sourceItemId"
+  },
+  "fileFields": {
+    "path": "path",
+    "humanSize": "humanSize"
+  },
+  "defaults": {
+    "magnet": "magnet:?xt=urn:btih:{infoHashUpper}",
+    "webUrl": "{sourceItemId}"
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "_comment": "示例 JSON API 插件（搜索返回 JSON），需修改 baseUrl/itemsPath 為真實 API",
+  "schemaVersion": 1,
+  "id": "example-api",
+  "name": "Example API Source (示例，需替換)",
+  "enabled": false,
+  "baseUrl": "https://example.com",
+  "headers": {
+    "User-Agent": "Mozilla/5.0",
+    "Accept": "application/json"
+  },
+  "search": {
+    "method": "GET",
+    "url": "/api/search?q={query}&page={page}",
+    "responseType": "json",
+    "itemsPath": "data.items",
+    "totalPath": "data.total",
+    "currentPagePath": "data.page",
+    "lastPagePath": "data.lastPage",
+    "pageSize": 20
+  },
+  "detail": {
+    "method": "GET",
+    "url": "/api/torrent/{infoHashLower}",
+    "responseType": "json",
+    "rootPath": "data",
+    "filesPath": "files"
+  },
+  "fields": {
+    "sourceItemId": "id",
+    "title": "title",
+    "infoHash": "hash",
+    "size": "bytes",
+    "seeders": "seeders",
+    "leechers": "leechers",
+    "createdAt": "createdAt"
+  },
+  "fileFields": {
+    "path": "path",
+    "size": "size",
+    "humanSize": "humanSize"
+  },
+  "defaults": {
+    "magnet": "magnet:?xt=urn:btih:{infoHashUpper}",
+    "webUrl": "/t/{sourceItemId}"
+  }
+}

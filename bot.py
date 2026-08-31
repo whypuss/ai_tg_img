@@ -1009,6 +1009,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "搜圖片：/P <關鍵詞>\n"
             "搜影片（播放）：/V <關鍵詞>\n"
             "搜 JAV：/J <番號/關鍵詞>（Jable 直播源）\n"
+            "搜 BT 磁力：/bts <關鍵詞>（JAVBUS 插件引擎）\n"
             "搜 Telegram 群組：/find <關鍵字>\n"
             "朗讀：/say（普通話）/sayc（粵語）<文字>")
     # 擁有者私聊：底部加面板按鈕
@@ -2057,6 +2058,327 @@ async def jable_search_command(update: Update, context: ContextTypes.DEFAULT_TYP
                                      disable_web_page_preview=True)
 
 
+# ================= BT 搜索 /bts (JAVBUS JSON Plugin v1) =================
+BTS_PAGE_SIZE = 6  # 每頁顯示條數（Telegram 消息長度限制）
+
+async def bts_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """BT 磁力搜索：/bts <關鍵詞> [頁碼] → 按 JAVBUS 插件協議並發搜索"""
+    try:
+        import javbus_engine
+    except Exception as e:
+        await update.message.reply_text(f"❌ 引擎載入失敗：{e}")
+        return
+
+    args = list(context.args)
+    page = 1
+    # 最後一個參數如果是純數字當頁碼
+    if args and args[-1].isdigit():
+        try:
+            p = int(args[-1])
+            if 1 <= p <= 100:
+                page = p
+                args = args[:-1]
+        except: pass
+    query = " ".join(args).strip()
+    if not query and update.message.reply_to_message:
+        query = (update.message.reply_to_message.text or "").strip()
+        # 回覆消息也可能帶頁碼
+        if query.isdigit():
+            query = ""
+    if not query:
+        plugins = javbus_engine.load_plugins()
+        if not plugins:
+            await update.message.reply_text(
+                "用法：/bts <關鍵詞> [頁碼]\n例：/bts linux iso\n例：/bts ubuntu 2\n\n⚠️ 尚未安裝任何插件\n請在 plugins/ 目錄放入 JAVBUS JSON 插件（見 docs/json_plugin_v1.md）\n或從 URL 安裝：把 .json 文件放到 plugins/ 即生效")
+        else:
+            names = ", ".join(p.get("name", p.get("id")) for p in plugins[:8])
+            await update.message.reply_text(
+                f"用法：/bts <關鍵詞> [頁碼]\n例：/bts linux iso\n\n已載入 {len(plugins)} 個插件：{names}")
+        return
+
+    status = await update.message.reply_text(f"🔍 BT 搜尋「{query}」第 {page} 頁…")
+    try:
+        result = await javbus_engine.search_all_plugins(query, page=page)
+    except Exception as e:
+        log.exception("bts search_all failed")
+        await status.edit_text(f"❌ 搜索失敗：{str(e)[:300]}")
+        return
+
+    items = result.get("items", [])
+    errors = result.get("errors", [])
+
+    if not items:
+        err_hint = ""
+        if errors:
+            err_hint = "\n" + "\n".join(errors[:3])
+        await status.edit_text(f"😿 搵唔到「{query}」相關資源{err_hint}\n\n💡 檢查 plugins/ 插件是否正確，或嘗試其他關鍵詞")
+        return
+
+    # 分頁：BTS_PAGE_SIZE 每頁
+    total = len(items)
+    start = 0
+    # query 可能含空格，callback_data 需編碼（用 quote）
+    from urllib.parse import quote as _q, unquote as _uq
+    # 存到 user_data 供翻頁/詳情用（key 包含 query+page 避免衝突）
+    cache_key = f"bts:{query}:{page}"
+    context.user_data[cache_key] = items
+    context.user_data["bts_last_query"] = query
+    context.user_data["bts_last_page"] = page
+
+    def build_page_text(page_items, page_idx, total_pages):
+        lines = [f"🧲 「{query}」第 {page_idx+1}/{total_pages} 頁（共 {total} 條）：\n"]
+        for i, it in enumerate(page_items, 1):
+            idx = page_idx * BTS_PAGE_SIZE + i
+            title = (it.get("title") or "無標題")[:70]
+            size = it.get("humanSize") or (it.get("size") or "")
+            seeders = it.get("seeders") or ""
+            plugin_name = it.get("_plugin_name") or it.get("_plugin_id") or ""
+            meta = []
+            if size: meta.append(f"📦 {size}")
+            if seeders: meta.append(f"👥 {seeders}")
+            if plugin_name: meta.append(f"🔌 {plugin_name}")
+            lines.append(f"{idx}. {title}\n   {' | '.join(meta) if meta else ''}")
+        return "\n".join(lines)
+
+    total_pages = max(1, (total + BTS_PAGE_SIZE - 1) // BTS_PAGE_SIZE)
+    cur = 0
+    page_items = items[cur*BTS_PAGE_SIZE:(cur+1)*BTS_PAGE_SIZE]
+    text = build_page_text(page_items, cur, total_pages)
+
+    # 按鈕：每條結果 2 個按鈕（磁力 / 詳情），底部翻頁
+    def build_kb(page_idx):
+        kb = []
+        base = page_idx * BTS_PAGE_SIZE
+        chunk = items[base:base+BTS_PAGE_SIZE]
+        for j, it in enumerate(chunk):
+            gidx = base + j
+            # 回調數據需短：bts:action:global_idx
+            row = []
+            if it.get("magnet"):
+                row.append(InlineKeyboardButton(f"{gidx+1} 🧲 磁力", callback_data=f"bts:mag:{gidx}"))
+            if it.get("webUrl"):
+                row.append(InlineKeyboardButton(f"{gidx+1} 🔗 詳情", callback_data=f"bts:web:{gidx}"))
+            # 文件列表按鈕（如果有 files 或 detail 支持）
+            row.append(InlineKeyboardButton(f"{gidx+1} 📄 詳情頁", callback_data=f"bts:detail:{gidx}"))
+            kb.append(row)
+        nav = []
+        if page_idx > 0:
+            nav.append(InlineKeyboardButton("⬅️ 上一頁", callback_data=f"bts:page:{page_idx-1}"))
+        if page_idx + 1 < total_pages:
+            nav.append(InlineKeyboardButton("下一頁 ➡️", callback_data=f"bts:page:{page_idx+1}"))
+        if nav:
+            kb.append(nav)
+        # 重新搜索下一頁（插件層分頁）
+        if total >= BTS_PAGE_SIZE or page > 1:
+            kb.append([InlineKeyboardButton(f"🔍 載入插件第 {page+1} 頁", callback_data=f"bts:nextp:{page+1}")])
+        return InlineKeyboardMarkup(kb)
+
+    await status.edit_text(text, reply_markup=build_kb(cur), disable_web_page_preview=True)
+
+
+async def bts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    try:
+        import javbus_engine
+    except Exception as e:
+        await q.answer(f"引擎錯誤: {e}", show_alert=True)
+        return
+    data = q.data or ""
+    # data 格式 bts:<action>:<idx>
+    try:
+        _, action, val = data.split(":", 2)
+    except ValueError:
+        await q.answer("❌ 參數錯誤", show_alert=True)
+        return
+
+    query = context.user_data.get("bts_last_query", "")
+    page = context.user_data.get("bts_last_page", 1)
+    cache_key = f"bts:{query}:{page}"
+    items = context.user_data.get(cache_key, [])
+
+    if action == "page":
+        try:
+            page_idx = int(val)
+        except: return
+        total = len(items)
+        total_pages = max(1, (total + BTS_PAGE_SIZE - 1) // BTS_PAGE_SIZE)
+        if not (0 <= page_idx < total_pages):
+            await q.answer("❌ 頁碼錯誤", show_alert=True)
+            return
+        def build_page_text(page_items, page_idx, total_pages):
+            lines = [f"🧲 「{query}」第 {page_idx+1}/{total_pages} 頁（共 {total} 條）：\n"]
+            for i, it in enumerate(page_items, 1):
+                idx = page_idx * BTS_PAGE_SIZE + i
+                title = (it.get("title") or "無標題")[:70]
+                size = it.get("humanSize") or (it.get("size") or "")
+                seeders = it.get("seeders") or ""
+                plugin_name = it.get("_plugin_name") or it.get("_plugin_id") or ""
+                meta = []
+                if size: meta.append(f"📦 {size}")
+                if seeders: meta.append(f"👥 {seeders}")
+                if plugin_name: meta.append(f"🔌 {plugin_name}")
+                lines.append(f"{idx}. {title}\n   {' | '.join(meta) if meta else ''}")
+            return "\n".join(lines)
+        page_items = items[page_idx*BTS_PAGE_SIZE:(page_idx+1)*BTS_PAGE_SIZE]
+        text = build_page_text(page_items, page_idx, total_pages)
+        def build_kb(page_idx):
+            kb = []
+            base = page_idx * BTS_PAGE_SIZE
+            chunk = items[base:base+BTS_PAGE_SIZE]
+            for j, it in enumerate(chunk):
+                gidx = base + j
+                row = []
+                if it.get("magnet"):
+                    row.append(InlineKeyboardButton(f"{gidx+1} 🧲 磁力", callback_data=f"bts:mag:{gidx}"))
+                if it.get("webUrl"):
+                    row.append(InlineKeyboardButton(f"{gidx+1} 🔗 詳情", callback_data=f"bts:web:{gidx}"))
+                row.append(InlineKeyboardButton(f"{gidx+1} 📄 詳情頁", callback_data=f"bts:detail:{gidx}"))
+                kb.append(row)
+            nav = []
+            if page_idx > 0:
+                nav.append(InlineKeyboardButton("⬅️ 上一頁", callback_data=f"bts:page:{page_idx-1}"))
+            if page_idx + 1 < total_pages:
+                nav.append(InlineKeyboardButton("下一頁 ➡️", callback_data=f"bts:page:{page_idx+1}"))
+            if nav: kb.append(nav)
+            kb.append([InlineKeyboardButton(f"🔍 載入插件第 {page+1} 頁", callback_data=f"bts:nextp:{page+1}")])
+            return InlineKeyboardMarkup(kb)
+        try:
+            await q.edit_message_text(text, reply_markup=build_kb(page_idx), disable_web_page_preview=True)
+        except Exception as e:
+            log.warning("bts page edit failed: %s", e)
+        return
+
+    if action == "nextp":
+        # 載入插件下一頁
+        try:
+            next_page = int(val)
+        except: return
+        await q.edit_message_text(f"🔍 載入「{query}」第 {next_page} 頁…")
+        try:
+            result = await javbus_engine.search_all_plugins(query, page=next_page)
+            new_items = result.get("items", [])
+            if not new_items:
+                await q.edit_message_text(f"😿 第 {next_page} 頁無結果")
+                return
+            # 替換緩存
+            context.user_data["bts_last_page"] = next_page
+            new_key = f"bts:{query}:{next_page}"
+            context.user_data[new_key] = new_items
+            # 復用顯示邏輯：直接把 new_items 當前頁顯示
+            total = len(new_items)
+            total_pages = max(1, (total + BTS_PAGE_SIZE - 1) // BTS_PAGE_SIZE)
+            page_items = new_items[:BTS_PAGE_SIZE]
+            lines = [f"🧲 「{query}」第 1/{total_pages} 頁（共 {total} 條，插件第 {next_page} 頁）：\n"]
+            for i, it in enumerate(page_items, 1):
+                title = (it.get("title") or "無標題")[:70]
+                size = it.get("humanSize") or ""
+                seeders = it.get("seeders") or ""
+                plugin_name = it.get("_plugin_name") or ""
+                meta = []
+                if size: meta.append(f"📦 {size}")
+                if seeders: meta.append(f"👥 {seeders}")
+                if plugin_name: meta.append(f"🔌 {plugin_name}")
+                lines.append(f"{i}. {title}\n   {' | '.join(meta) if meta else ''}")
+            text = "\n".join(lines)
+            kb = []
+            for j, it in enumerate(page_items):
+                row = []
+                if it.get("magnet"):
+                    row.append(InlineKeyboardButton(f"{j+1} 🧲 磁力", callback_data=f"bts:mag:{j}"))
+                if it.get("webUrl"):
+                    row.append(InlineKeyboardButton(f"{j+1} 🔗 詳情", callback_data=f"bts:web:{j}"))
+                row.append(InlineKeyboardButton(f"{j+1} 📄 詳情頁", callback_data=f"bts:detail:{j}"))
+                kb.append(row)
+            nav = []
+            if total_pages > 1:
+                nav.append(InlineKeyboardButton("下一頁 ➡️", callback_data=f"bts:page:1"))
+            if nav: kb.append(nav)
+            kb.append([InlineKeyboardButton(f"🔍 載入插件第 {next_page+1} 頁", callback_data=f"bts:nextp:{next_page+1}")])
+            # 注意：此時 bts:mag 索引基於新緩存，需要更新 last_query/page 已是 next_page
+            await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), disable_web_page_preview=True)
+        except Exception as e:
+            log.exception("bts nextp failed")
+            await q.edit_message_text(f"❌ 載入失敗：{str(e)[:200]}")
+        return
+
+    # 以下操作需要 gidx
+    try:
+        gidx = int(val)
+    except:
+        await q.answer("❌ 索引錯誤", show_alert=True)
+        return
+    if not (0 <= gidx < len(items)):
+        await q.answer("❌ 結果已過期，請重新 /bts", show_alert=True)
+        return
+    it = items[gidx]
+
+    if action == "mag":
+        magnet = it.get("magnet") or ""
+        if not magnet:
+            await q.answer("❌ 無磁力連結", show_alert=True)
+            return
+        title = (it.get("title") or "")[:80]
+        # 磁力連結直接發送（可點擊複製）
+        await context.bot.send_message(chat_id=q.message.chat_id,
+            text=f"🧲 {title}\n\n`{magnet}`\n\n💡 長按複製磁力", parse_mode="Markdown")
+        await q.answer("已發送磁力 ✅")
+        return
+
+    if action == "web":
+        url = it.get("webUrl") or ""
+        if not url:
+            await q.answer("❌ 無詳情連結", show_alert=True)
+            return
+        title = (it.get("title") or "")[:80]
+        await context.bot.send_message(chat_id=q.message.chat_id,
+            text=f"🔗 {title}\n{url}", disable_web_page_preview=True)
+        await q.answer()
+        return
+
+    if action == "detail":
+        # 嘗試抓取詳情頁補全 magnet/files
+        pid = it.get("_plugin_id") or ""
+        plugins = javbus_engine.load_plugins()
+        plugin = next((p for p in plugins if p.get("id") == pid), None)
+        if not plugin or not plugin.get("detail"):
+            # 無 detail 配置，直接顯示已有信息
+            title = it.get("title") or "無標題"
+            size = it.get("humanSize") or it.get("size") or "未知"
+            magnet = it.get("magnet") or "無"
+            web = it.get("webUrl") or "無"
+            text = f"📄 {title}\n\n📦 大小：{size}\n🧲 磁力：`{magnet}`\n🔗 詳情：{web}\n🔌 來源：{it.get('_plugin_name','')}"
+            await context.bot.send_message(chat_id=q.message.chat_id, text=text, parse_mode="Markdown", disable_web_page_preview=True)
+            await q.answer()
+            return
+        await q.answer("⏳ 抓取詳情…")
+        status = await context.bot.send_message(chat_id=q.message.chat_id, text=f"⏳ 抓取「{(it.get('title') or '')[:40]}」詳情…")
+        try:
+            detail_item = await javbus_engine.fetch_detail(plugin, dict(it))
+            title = detail_item.get("title") or it.get("title") or "無標題"
+            magnet = detail_item.get("magnet") or it.get("magnet") or "無"
+            size = detail_item.get("humanSize") or detail_item.get("size") or it.get("humanSize") or "未知"
+            web = detail_item.get("webUrl") or it.get("webUrl") or ""
+            files = detail_item.get("files") or []
+            lines = [f"📄 {title}", f"", f"📦 大小：{size}", f"🔌 來源：{detail_item.get('_plugin_name','')}", f"🔗 詳情：{web}"]
+            if magnet and magnet != "無":
+                lines.append(f"\n🧲 磁力：`{magnet}`")
+            if files:
+                lines.append(f"\n📁 文件列表（{len(files)}）：")
+                for f in files[:15]:
+                    fname = f.get("path") or f.get("name") or "?"
+                    fsize = f.get("humanSize") or f.get("size") or ""
+                    lines.append(f"  • {fname} {fsize}")
+                if len(files) > 15:
+                    lines.append(f"  … 還有 {len(files)-15} 個文件")
+            text = "\n".join(lines)
+            await status.edit_text(text[:4000], parse_mode="Markdown", disable_web_page_preview=True)
+        except Exception as e:
+            log.exception("bts detail failed")
+            await status.edit_text(f"❌ 詳情抓取失敗：{str(e)[:300]}")
+        return
+
+
 # ================= 自動問答 & 深夜胡說 =================
 # 關鍵字觸發：中文/英文問號 + 常見粵語/普通話疑問詞/語氣詞
 QUESTION_PATTERN = re.compile(
@@ -2350,6 +2672,7 @@ async def _set_bot_commands(app):
         BotCommand("p", "搜圖片"),
         BotCommand("v", "搜影片"),
         BotCommand("j", "搜 JAV (Jable 直播源)"),
+        BotCommand("bts", "搜 BT 磁力 (JAVBUS 插件)"),
         BotCommand("say", "朗讀（普通話）"),
         BotCommand("sayc", "朗讀（粵語）"),
     ]
@@ -2401,8 +2724,11 @@ def main():
     app.add_handler(CommandHandler("V", require_auth(video_search_command)))
     app.add_handler(CommandHandler("j", require_auth(jable_search_command)))
     app.add_handler(CommandHandler("J", require_auth(jable_search_command)))
+    app.add_handler(CommandHandler("bts", require_auth(bts_search_command)))
+    app.add_handler(CommandHandler("BTS", require_auth(bts_search_command)))
     app.add_handler(CallbackQueryHandler(song_callback, pattern="^song:"))
     app.add_handler(CallbackQueryHandler(video_callback, pattern="^vid:"))
+    app.add_handler(CallbackQueryHandler(bts_callback, pattern="^bts:"))
     # TEMP DEBUG: catch-all at group -1 to confirm live dispatch reaches group messages
     # _dbg_gm1 removed for test
     app.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin:"))
